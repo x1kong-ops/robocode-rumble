@@ -11,6 +11,7 @@ battles/current.battle
 
 # 离线训练数据（datagen.ps1 随时可重新生成）
 ml/data/
+__pycache__/
 
 # IDE
 .idea/
