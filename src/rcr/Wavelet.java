@@ -8,6 +8,7 @@ import robocode.AdvancedRobot;
 import robocode.BattleEndedEvent;
 import robocode.BulletHitBulletEvent;
 import robocode.BulletHitEvent;
+import robocode.BulletMissedEvent;
 import robocode.HitByBulletEvent;
 import robocode.HitRobotEvent;
 import robocode.HitWallEvent;
@@ -46,7 +47,7 @@ public class Wavelet extends AdvancedRobot {
         setAdjustRadarForGunTurn(true);
 
         surfing = new Surfing(this);
-        gun = new KnnGun(this);
+        gun = new KnnGun(this, surfing);
 
         setTurnRadarRightRadians(Double.POSITIVE_INFINITY);
         while (true) {
@@ -76,14 +77,14 @@ public class Wavelet extends AdvancedRobot {
             myLateralDirection = myLateralVelocity > 0 ? 1 : -1;
         }
         Snapshot cur = new Snapshot(getTime(), myLocation, enemyLocation,
-                myLateralDirection, absBearingEnemyToMe);
+                myLateralDirection, absBearingEnemyToMe, Math.abs(myLateralVelocity));
 
         // 开火检测：能量下降 (0.09, 3.01) 视为开火，功率即能量差
         double drop = enemyEnergy - e.getEnergy();
         double firedPower = drop > 0.09 && drop < 3.01 ? drop : -1;
         enemyEnergy = e.getEnergy();
 
-        surfing.onScan(cur, prev, firedPower);
+        surfing.onScan(cur, prev, firedPower, e.getEnergy());
         gun.onScan(myLocation, enemyLocation, e.getVelocity(), e.getHeadingRadians(),
                 e.getEnergy(), getTime());
 
@@ -103,12 +104,19 @@ public class Wavelet extends AdvancedRobot {
         surfing.onBulletContact(
                 new Point2D.Double(e.getHitBullet().getX(), e.getHitBullet().getY()),
                 e.getHitBullet().getVelocity(), getTime());
+        surfing.onMyBulletDeath(e.getBullet(), getTime());
     }
 
     @Override
     public void onBulletHit(BulletHitEvent e) {
         enemyEnergy -= Rules.getBulletDamage(e.getBullet().getPower());
         KnnGun.onMyBulletHit();
+        surfing.onMyBulletDeath(e.getBullet(), getTime());
+    }
+
+    @Override
+    public void onBulletMissed(BulletMissedEvent e) {
+        surfing.onMyBulletDeath(e.getBullet(), getTime());
     }
 
     @Override
@@ -146,6 +154,7 @@ public class Wavelet extends AdvancedRobot {
             ps.println("wallHits=" + wallHits);
             ps.println("knnData=" + KnnGun.dataSize());
             ps.println(KnnGun.gunStats().replace(' ', '\n'));
+            ps.println(Surfing.surfStats().replace(' ', '\n'));
             ps.close();
         } catch (Exception ignored) {
             // 统计写不出去不影响对战

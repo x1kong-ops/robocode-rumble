@@ -55,6 +55,7 @@ final class KnnGun {
     private static int myHits;
 
     private final AdvancedRobot robot;
+    private final Surfing surfing; // 开火时通知铺 bullet shadow
     private final Rectangle2D.Double field;
     private final List<GunWave> waves = new ArrayList<GunWave>();
 
@@ -75,8 +76,9 @@ final class KnnGun {
         double gfAs;
     }
 
-    KnnGun(AdvancedRobot robot) {
+    KnnGun(AdvancedRobot robot, Surfing surfing) {
         this.robot = robot;
+        this.surfing = surfing;
         this.field = new Rectangle2D.Double(18, 18,
                 robot.getBattleFieldWidth() - 36, robot.getBattleFieldHeight() - 36);
     }
@@ -174,6 +176,9 @@ final class KnnGun {
                 if (useAs) {
                     asFired++;
                 }
+                // 子弹在下一 turn 移动前、炮管转动前发射：出膛角 = 当前炮管朝向
+                surfing.onMyBulletFired(b, myLocation, robot.getGunHeadingRadians(),
+                        bulletSpeed, time);
             }
         }
     }
@@ -210,34 +215,35 @@ final class KnnGun {
 
     /**
      * 加权核密度估计：在近邻的 GF 中选密度峰值。
-     * 每个近邻的贡献 = 先验权重 ×（可选）年龄衰减 0.5^(age/halfLife)。
+     * 每个近邻的贡献 = 先验权重 × 特征距离权重 1/(1+√d) ×（可选）年龄衰减 0.5^(age/halfLife)。
      */
     private static double aim(Knn data, double[] query, int k, double bandwidth, double halfLife) {
         if (data.size() == 0) {
             return 0;
         }
-        List<Knn.Entry> neighbors = data.nearest(query, Math.min(k, data.size()));
+        List<Knn.Neighbor> neighbors = data.nearest(query, Math.min(k, data.size()));
         int n = neighbors.size();
+        double[] gf = new double[n];
         double[] wgt = new double[n];
         for (int i = 0; i < n; i++) {
-            Knn.Entry e = neighbors.get(i);
-            wgt[i] = e.weight;
+            Knn.Neighbor nb = neighbors.get(i);
+            gf[i] = nb.entry.value;
+            wgt[i] = nb.entry.weight;
             if (halfLife > 0) {
-                wgt[i] *= Math.pow(0.5, (data.seq() - e.seq) / halfLife);
+                wgt[i] *= Math.pow(0.5, (data.seq() - nb.entry.seq) / halfLife);
             }
         }
         double bestGf = 0;
         double bestScore = -1;
         for (int i = 0; i < n; i++) {
-            double vi = neighbors.get(i).value;
             double score = 0;
             for (int j = 0; j < n; j++) {
-                double z = (vi - neighbors.get(j).value) / bandwidth;
+                double z = (gf[i] - gf[j]) / bandwidth;
                 score += wgt[j] * Math.exp(-0.5 * z * z);
             }
             if (score > bestScore) {
                 bestScore = score;
-                bestGf = vi;
+                bestGf = gf[i];
             }
         }
         return bestGf;

@@ -28,7 +28,8 @@ final class Knn {
         }
     }
 
-    private static final class Neighbor {
+    /** 近邻查询结果：样本 + 加权欧氏距离的平方。 */
+    static final class Neighbor {
         final Entry entry;
         final double dist;
 
@@ -69,7 +70,7 @@ final class Knn {
     }
 
     /** 返回 k 个加权距离最近的样本（顺序不保证）。 */
-    List<Entry> nearest(double[] query, int k) {
+    List<Neighbor> nearest(double[] query, int k) {
         PriorityQueue<Neighbor> heap = new PriorityQueue<Neighbor>(Math.max(1, k),
                 new Comparator<Neighbor>() {
                     @Override
@@ -90,10 +91,6 @@ final class Knn {
                 heap.add(new Neighbor(e, d));
             }
         }
-        List<Entry> out = new ArrayList<Entry>(heap.size());
-        for (Neighbor n : heap) {
-            out.add(n.entry);
-        }
-        return out;
+        return new ArrayList<Neighbor>(heap);
     }
 }

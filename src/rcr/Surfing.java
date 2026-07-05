@@ -4,10 +4,13 @@ import java.awt.Graphics2D;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 
 import robocode.AdvancedRobot;
+import robocode.Bullet;
 import robocode.util.Utils;
 
 /**
@@ -38,20 +41,47 @@ final class Surfing {
     private static final double DIVE_PROTECT_DISTANCE = 360; // 低于此预测敌距开始惩罚俯冲
     private static final double DANGER_EPSILON = 0.05;       // 零窗口选项间仍按距离分优劣
 
-    /** 命中 GF 统计，跨回合保留；在 GF0 播种，保证零数据时也躲 head-on。 */
-    private static final double[] STATS = new double[BINS];
+    /**
+     * 命中 GF 统计，按「我的横向速度 × 敌我距离」分 3×3 段（对手的分段 GF 枪按局面
+     * 打我们，躲避也必须按局面记）。跨回合保留；每段在 GF0 播种，零数据时也躲 head-on。
+     */
+    private static final int LAT_SEGS = 3;
+    private static final int DIST_SEGS = 3;
+    private static final double[][][] STATS = new double[LAT_SEGS][DIST_SEGS][BINS];
     static {
-        for (int x = 0; x < BINS; x++) {
-            STATS[x] = 0.1 / ((x - MID) * (x - MID) + 1);
+        for (double[][] lat : STATS) {
+            for (double[] seg : lat) {
+                for (int x = 0; x < BINS; x++) {
+                    seg[x] = 0.1 / ((x - MID) * (x - MID) + 1);
+                }
+            }
         }
+    }
+
+    private static double[] segmentFor(double absLatVelocity, double distance) {
+        int li = absLatVelocity < 2 ? 0 : absLatVelocity < 6 ? 1 : 2;
+        int di = distance < 350 ? 0 : distance < 550 ? 1 : 2;
+        return STATS[li][di];
     }
 
     private static int lastSurfDirection = 1;
     private static int idleDirection = 1;
+    private static int shadowPieces;  // 诊断：本场生成的阴影片段数
+    private static int gunheatWaves;  // 诊断：本场生成的 gunheat 虚波数
 
     private final AdvancedRobot robot;
     private final Rectangle2D.Double field;
+    private final double fieldW;
+    private final double fieldH;
     private final List<EnemyWave> waves = new ArrayList<EnemyWave>();
+    private final List<MyBullet> myBullets = new ArrayList<MyBullet>();
+
+    // 敌人枪热模型（gunheat waves 用）：回合开始 3.0，每 tick 冷却 coolingRate，开火 +1+p/5
+    private final double coolingRate;
+    private double enemyGunHeat = 3.0;
+    private long heatRefTime;
+    private double lastEnemyPower = 1.9;
+    private EnemyWave pendingImaginary;
 
     static final class EnemyWave {
         Point2D.Double origin;
@@ -61,6 +91,33 @@ final class Surfing {
         double directAngle; // 开火时 敌→我 的绝对方位（GF0）
         int direction;      // 开火时我的横向方向
         double distanceTraveled;
+        boolean imaginary;  // gunheat 预测波：还没真开火，仅用于提前冲浪
+        double[] stats;     // 开火局面对应的统计段
+        final List<Shadow> shadows = new ArrayList<Shadow>();
+    }
+
+    /** 我方飞行中的子弹（阴影计算用）。 */
+    private static final class MyBullet {
+        Bullet ref;
+        Point2D.Double origin;
+        double angle;
+        double speed;
+        long fireTime;
+    }
+
+    /** 我方子弹在敌波上挡出的 GF 安全区间；crossTime 前子弹若死亡则阴影不成立。 */
+    static final class Shadow {
+        final double gfLow;
+        final double gfHigh;
+        final long crossTime;
+        final Object bullet;
+
+        Shadow(double gfLow, double gfHigh, long crossTime, Object bullet) {
+            this.gfLow = gfLow;
+            this.gfHigh = gfHigh;
+            this.crossTime = crossTime;
+            this.bullet = bullet;
+        }
     }
 
     /** 精确预测用的自身运动状态。 */
@@ -90,14 +147,20 @@ final class Surfing {
 
     Surfing(AdvancedRobot robot) {
         this.robot = robot;
-        this.field = new Rectangle2D.Double(18, 18,
-                robot.getBattleFieldWidth() - 36, robot.getBattleFieldHeight() - 36);
+        this.fieldW = robot.getBattleFieldWidth();
+        this.fieldH = robot.getBattleFieldHeight();
+        this.field = new Rectangle2D.Double(18, 18, fieldW - 36, fieldH - 36);
+        this.coolingRate = robot.getGunCoolingRate();
+    }
+
+    static String surfStats() {
+        return "shadowPieces=" + shadowPieces + " gunheatWaves=" + gunheatWaves;
     }
 
     // ===================== 波管理 =====================
 
     /** 每个扫描 tick 调用：检测到开火则建波，然后推进波并执行冲浪。 */
-    void onScan(Snapshot cur, Snapshot prev, double firedPower) {
+    void onScan(Snapshot cur, Snapshot prev, double firedPower, double enemyEnergy) {
         if (firedPower > 0 && prev != null) {
             EnemyWave w = new EnemyWave();
             w.origin = prev.enemyLocation;
@@ -106,10 +169,54 @@ final class Surfing {
             w.power = firedPower;
             w.directAngle = prev.absBearingEnemyToMe;
             w.direction = prev.myLateralDirection;
+            w.stats = segmentFor(prev.myAbsLateralVelocity,
+                    prev.myLocation.distance(prev.enemyLocation));
             waves.add(w);
+            for (MyBullet b : myBullets) {
+                computeShadows(b, w);
+            }
+            // 真波到了，撤掉对应的预测波；枪热重置（开火发生在 cur.time-1）
+            if (pendingImaginary != null) {
+                waves.remove(pendingImaginary);
+                pendingImaginary = null;
+            }
+            lastEnemyPower = firedPower;
+            enemyGunHeat = 1 + firedPower / 5 - coolingRate; // 已冷却到 cur.time
+            heatRefTime = cur.time;
         }
+        updateGunheatWave(cur, enemyEnergy);
         updateWaves(cur);
         surf(cur);
+    }
+
+    /**
+     * gunheat wave：敌人枪热 ≤2 tick 归零时，用它当前位置/上次功率立一个预测波提前冲浪，
+     * 消掉「开火检测滞后 1 tick + 反应 1 tick」的裸奔窗口。真波到达即替换；对手憋枪
+     * 超过预计 2 tick 就撤销重建（跟着它的新位置走）。
+     */
+    private void updateGunheatWave(Snapshot cur, double enemyEnergy) {
+        if (pendingImaginary != null && cur.time > pendingImaginary.fireTime + 2) {
+            waves.remove(pendingImaginary);
+            pendingImaginary = null;
+        }
+        double heatNow = Math.max(0, enemyGunHeat - coolingRate * (cur.time - heatRefTime));
+        int eta = (int) Math.ceil(heatNow / coolingRate);
+        if (pendingImaginary == null && eta <= 2 && enemyEnergy > 0.2) {
+            EnemyWave w = new EnemyWave();
+            double pEst = RcMath.limit(0.1, lastEnemyPower, enemyEnergy);
+            w.origin = cur.enemyLocation;
+            w.fireTime = cur.time + eta;
+            w.speed = RcMath.bulletSpeed(pEst);
+            w.power = pEst;
+            w.directAngle = cur.absBearingEnemyToMe;
+            w.direction = cur.myLateralDirection;
+            w.stats = segmentFor(cur.myAbsLateralVelocity,
+                    cur.myLocation.distance(cur.enemyLocation));
+            w.imaginary = true;
+            waves.add(w);
+            pendingImaginary = w;
+            gunheatWaves++;
+        }
     }
 
     private void updateWaves(Snapshot cur) {
@@ -119,6 +226,12 @@ final class Surfing {
             w.distanceTraveled = (cur.time - w.fireTime) * w.speed;
             if (w.distanceTraveled > w.origin.distance(cur.myLocation) + 50) {
                 it.remove();
+            }
+        }
+        Iterator<MyBullet> bt = myBullets.iterator();
+        while (bt.hasNext()) { // 兜底清理（正常路径由死亡事件移除）
+            if ((cur.time - bt.next().fireTime) * 20 > 1400) {
+                bt.remove();
             }
         }
     }
@@ -148,10 +261,14 @@ final class Surfing {
         return (int) RcMath.limit(0, factor * MID + MID, BINS - 1);
     }
 
+    /**
+     * 记录命中并做滚动衰减（×0.75）：对手的枪在学习/切换瞄准解，太老的命中样本
+     * 会让我们一直躲它早已不用的角度。深度 ≈ 1/(1-0.75) = 4 次命中的记忆（按段独立）。
+     */
     private static void logHit(EnemyWave w, Point2D.Double hitLocation) {
         int index = factorIndex(w, hitLocation);
         for (int x = 0; x < BINS; x++) {
-            STATS[x] += 1.0 / ((x - index) * (x - index) + 1);
+            w.stats[x] = w.stats[x] * 0.75 + 1.0 / ((x - index) * (x - index) + 1);
         }
     }
 
@@ -160,6 +277,9 @@ final class Surfing {
         EnemyWave match = null;
         double bestDiff = 50;
         for (EnemyWave w : waves) {
+            if (w.imaginary) {
+                continue;
+            }
             double traveled = (time - w.fireTime) * w.speed;
             double diff = Math.abs(traveled - w.origin.distance(hitLocation));
             if (diff < bestDiff && Math.abs(w.speed - bulletVelocity) < 1.0) {
@@ -171,6 +291,192 @@ final class Surfing {
             logHit(match, hitLocation);
             waves.remove(match);
         }
+    }
+
+    // ===================== 我方子弹与 bullet shadows =====================
+
+    /** 我方开火（KnnGun 调用）：登记子弹并在所有真实敌波上铺阴影。 */
+    void onMyBulletFired(Bullet ref, Point2D.Double origin, double angle, double speed, long time) {
+        MyBullet b = new MyBullet();
+        b.ref = ref;
+        b.origin = origin;
+        b.angle = angle;
+        b.speed = speed;
+        b.fireTime = time;
+        myBullets.add(b);
+        for (EnemyWave w : waves) {
+            computeShadows(b, w);
+        }
+    }
+
+    /** 我方子弹死亡（命中敌人 / 对撞 / 撞墙）：撤销它尚未成立的阴影。 */
+    void onMyBulletDeath(Bullet ref, long time) {
+        Iterator<MyBullet> it = myBullets.iterator();
+        while (it.hasNext()) {
+            MyBullet b = it.next();
+            if (b.ref.equals(ref)) {
+                for (EnemyWave w : waves) {
+                    Iterator<Shadow> si = w.shadows.iterator();
+                    while (si.hasNext()) {
+                        Shadow s = si.next();
+                        if (s.bullet == b && s.crossTime >= time) {
+                            si.remove();
+                        }
+                    }
+                }
+                it.remove();
+                return;
+            }
+        }
+    }
+
+    private void computeShadows(MyBullet b, EnemyWave w) {
+        if (w.imaginary) {
+            return; // 预测波被真波替换时会重算，这里不用铺
+        }
+        List<double[]> pieces = shadowIntervals(w, b.origin, b.angle, b.speed, b.fireTime,
+                fieldW, fieldH);
+        for (double[] p : pieces) {
+            w.shadows.add(new Shadow(p[0], p[1], (long) p[2], b));
+            shadowPieces++;
+        }
+    }
+
+    /**
+     * 我方子弹在敌波上的阴影区间（引擎语义级）：
+     * 引擎每 tick 先动子弹再做「本 tick 两条位移线段相交」判定，因此
+     * tick U 上，敌方位于波上角度 φ 的子弹段 = 波源沿 φ 的 [r(U-1), r(U)] 径向段，
+     * 我方子弹段 = 弦 [p(U-1), p(U)]。两段相交 ⟺ 弦上存在点落在环带 [r(U-1), r(U)] 内
+     * 且方位为 φ。所以「弦 ∩ 环带」每个连通片的方位角范围就是该 tick 挡出的阴影。
+     * 弦被内圆截断时可能有两个连通片，逐片输出。子弹出界（撞墙死亡）即停止。
+     *
+     * @return 每片 {gfLow, gfHigh, crossTick}
+     */
+    static List<double[]> shadowIntervals(EnemyWave w, Point2D.Double bOrigin, double bAngle,
+                                          double bSpeed, long bFireTime, double fieldW, double fieldH) {
+        List<double[]> out = new ArrayList<double[]>();
+        double mea = RcMath.maxEscapeAngle(w.speed);
+        long u = Math.max(bFireTime, w.fireTime);
+        for (int guard = 0; guard < 150; guard++) {
+            u++;
+            Point2D.Double p1 = RcMath.project(bOrigin, bAngle, (u - 1 - bFireTime) * bSpeed);
+            Point2D.Double p2 = RcMath.project(bOrigin, bAngle, (u - bFireTime) * bSpeed);
+            double rOuter = (u - w.fireTime) * w.speed;
+            if (rOuter > 0) {
+                double rInner = Math.max(0, rOuter - w.speed);
+                collectChordAnnulusPieces(out, w, mea, p1, p2, rInner, rOuter, u);
+            }
+            if (p2.x < 0 || p2.x > fieldW || p2.y < 0 || p2.y > fieldH) {
+                break; // 子弹本 tick 出界死亡，之后不再产生阴影
+            }
+        }
+        return out;
+    }
+
+    /** 弦 [p1,p2] 与环带 [rInner,rOuter]（圆心 = 波源）各连通片的 GF 区间加入 out。 */
+    private static void collectChordAnnulusPieces(List<double[]> out, EnemyWave w, double mea,
+                                                  Point2D.Double p1, Point2D.Double p2,
+                                                  double rInner, double rOuter, long crossTick) {
+        double dx = p2.x - p1.x, dy = p2.y - p1.y;
+        double fx = p1.x - w.origin.x, fy = p1.y - w.origin.y;
+        double a = dx * dx + dy * dy;
+        if (a < 1e-12) {
+            return;
+        }
+        // 候选参数点：端点 + 弦与内外圆交点
+        double[] ts = new double[6];
+        int n = 0;
+        ts[n++] = 0;
+        ts[n++] = 1;
+        for (int c = 0; c < 2; c++) {
+            double r = c == 0 ? rInner : rOuter;
+            if (r <= 0) {
+                continue;
+            }
+            double bq = 2 * (fx * dx + fy * dy);
+            double cq = fx * fx + fy * fy - r * r;
+            double disc = bq * bq - 4 * a * cq;
+            if (disc > 0) {
+                double s = Math.sqrt(disc);
+                double t1 = (-bq - s) / (2 * a);
+                double t2 = (-bq + s) / (2 * a);
+                if (t1 > 0 && t1 < 1) {
+                    ts[n++] = t1;
+                }
+                if (t2 > 0 && t2 < 1) {
+                    ts[n++] = t2;
+                }
+            }
+        }
+        double[] sorted = new double[n];
+        System.arraycopy(ts, 0, sorted, 0, n);
+        java.util.Arrays.sort(sorted);
+        for (int i = 0; i + 1 < n; i++) {
+            double ta = sorted[i], tb = sorted[i + 1];
+            if (tb - ta < 1e-12) {
+                continue;
+            }
+            double tm = (ta + tb) / 2;
+            double mx = p1.x + tm * dx - w.origin.x;
+            double my = p1.y + tm * dy - w.origin.y;
+            double dm = Math.sqrt(mx * mx + my * my);
+            if (dm < rInner - 1e-9 || dm > rOuter + 1e-9) {
+                continue; // 该子段不在环带内
+            }
+            if (dm < 1e-9) {
+                continue; // 恰好过波源，方位退化（物理上等价于开火瞬间对撞，可忽略）
+            }
+            // 端点方位 → GF（相对子段中点方位归一防回绕）
+            double aMid = Math.atan2(mx, my);
+            double baseOff = Utils.normalRelativeAngle(aMid - w.directAngle);
+            double offA = baseOff + Utils.normalRelativeAngle(
+                    Math.atan2(p1.x + ta * dx - w.origin.x, p1.y + ta * dy - w.origin.y) - aMid);
+            double offB = baseOff + Utils.normalRelativeAngle(
+                    Math.atan2(p1.x + tb * dx - w.origin.x, p1.y + tb * dy - w.origin.y) - aMid);
+            double gfA = RcMath.limit(-1, offA / mea * w.direction, 1);
+            double gfB = RcMath.limit(-1, offB / mea * w.direction, 1);
+            double lo = Math.min(gfA, gfB), hi = Math.max(gfA, gfB);
+            if (hi - lo > 1e-9) {
+                out.add(new double[]{lo, hi, crossTick});
+            }
+        }
+    }
+
+    /** [lo,hi] GF 区间被该波阴影并集覆盖的比例。 */
+    private static double shadowedFraction(EnemyWave w, double lo, double hi) {
+        if (w.shadows.isEmpty() || hi - lo < 1e-12) {
+            return 0;
+        }
+        List<double[]> xs = new ArrayList<double[]>();
+        for (Shadow s : w.shadows) {
+            double a = Math.max(lo, s.gfLow);
+            double b = Math.min(hi, s.gfHigh);
+            if (b > a) {
+                xs.add(new double[]{a, b});
+            }
+        }
+        if (xs.isEmpty()) {
+            return 0;
+        }
+        Collections.sort(xs, new Comparator<double[]>() {
+            @Override
+            public int compare(double[] x, double[] y) {
+                return Double.compare(x[0], y[0]);
+            }
+        });
+        double covered = 0, curLo = xs.get(0)[0], curHi = xs.get(0)[1];
+        for (int i = 1; i < xs.size(); i++) {
+            double[] iv = xs.get(i);
+            if (iv[0] <= curHi) {
+                curHi = Math.max(curHi, iv[1]);
+            } else {
+                covered += curHi - curLo;
+                curLo = iv[0];
+                curHi = iv[1];
+            }
+        }
+        covered += curHi - curLo;
+        return Math.min(1, covered / (hi - lo));
     }
 
     // ===================== 精确预测与精确交点 =====================
@@ -343,7 +649,7 @@ final class Surfing {
         acc[1] = Math.max(acc[1], off);
     }
 
-    /** 角度窗口 → GF 窗口 → 覆盖 bin 的统计质量之和。 */
+    /** 角度窗口 → GF 窗口 → 覆盖 bin 的统计质量之和（bin 按阴影遮蔽比例打折）。 */
     private static double intervalMass(EnemyWave w, double minOff, double maxOff) {
         double mea = RcMath.maxEscapeAngle(w.speed);
         double gfA = RcMath.limit(-1, minOff / mea * w.direction, 1);
@@ -352,7 +658,11 @@ final class Surfing {
         int iHi = (int) Math.round(RcMath.limit(0, Math.max(gfA, gfB) * MID + MID, BINS - 1));
         double mass = 0;
         for (int i = iLo; i <= iHi; i++) {
-            mass += STATS[i];
+            double m = w.stats[i];
+            if (!w.shadows.isEmpty()) {
+                m *= 1 - shadowedFraction(w, (i - 0.5 - MID) / MID, (i + 0.5 - MID) / MID);
+            }
+            mass += m;
         }
         return mass;
     }

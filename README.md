@@ -15,6 +15,7 @@ src/rcr/Knn.java                     KNN 样本库（线性扫描，带样本权
 src/rcr/RcMath.java                  几何 / 物理 / 墙壁平滑公用函数
 src/rcr/Snapshot.java                双方状态快照（敌波回溯用）
 src/rcr/GeomTest.java                精确交点的暴力采样自检（java -cp out\classes;robocode.jar rcr.GeomTest）
+src/rcr/ShadowTest.java              bullet shadow 几何的暴力采样自检（同上，rcr.ShadowTest）
 scripts/build.ps1                    编译脚本（输出到 out/classes，保持 Java 8 兼容）
 scripts/run-battle.ps1               打包部署 + 无头对战 + 输出战果
 scripts/testbed.ps1                  8 对手基准测试组一键跑分
@@ -71,7 +72,13 @@ GUI 观战：打开 Robocode，新建对战选 `rcr.Wavelet dev`（开 Paint 可
   - 规则：基础 1.95；**打得准才打重**（整场命中率 ≥50% → 2.95、≥33% → 2.45；命中率 >1/3 开火才是能量正回报）；近距 <140 → 2.95；**能量差缩放**（中远距落后 >10 时每点降 0.02、下限 1.2，拖长回合等对手先垮）；击杀经济精确反解（p≤1 伤 4p / p>1 伤 6p−2）；<20 能量按 1/10 收缩防 disable；
   - 试过并**放弃**：滚动窗口命中率（连中片段冲过阈值误触发重弹，重弹更慢逃逸角更大，vs BasicGFSurfer 跌 7%）；阈值 0.25（同因误触发）；<300 无条件 2.45；击杀 +4 伤害余量（更差，精确反解本身够用）；
   - 实测（3×100 平均）：vs BasicGFSurfer ~70%、vs Komarious ~57-59%，与 1.3 在噪声带内持平——本阶段收益主要在弱走位对手的终结速度（Tracker 命中率 0.80 → 全程 2.95 重弹）与劣势局的能量续航；`hitRate/myShots` 已入 `stats.txt`。
-- **阶段 1（第 3–8 周，目标前 20 / ~87–88 APS）**：~~precise prediction + precise intersection~~ → ~~距离控制 + wall smoothing~~ → ~~KNN 双枪（通用 + anti-surfer）~~ → ~~能量管理（基础 power ~1.95 规则）~~ → 被动 bullet shadows + gunheat waves。
+- **阶段 1.5 bullet shadows（被动）+ gunheat waves + 冲浪统计升级——已完成（2026-07-05）**：
+  - **Bullet shadows**：按引擎语义（每 tick 双方位移线段相交判定）精确计算我方每颗飞行中子弹在敌波上挡出的 GF 安全区，`ShadowTest` 暴力采样自检 3901 例 0 失配；阴影按 bin 遮蔽比例折扣该 bin 的统计质量；子弹死亡（命中/对撞/撞墙）时撤销尚未成立的阴影；
+  - **Gunheat waves**：跟踪敌人枪热（开火 +1+p/5，每 tick 冷却 0.1），预计 ≤2 tick 内开火时用其当前位置/上次功率立预测波提前冲浪，消掉「检测滞后 1 tick + 反应 1 tick」的裸奔窗口；真波到达即替换，对手憋枪则滚动重建；
+  - **冲浪统计升级**（为达标 85+ 补做）：命中 GF 统计按「我的横向速度 × 敌我距离」3×3 分段（对手的分段 GF 枪按局面打我们，躲避也必须按局面记）+ 命中滚动衰减 ×0.75（记忆深度 ≈4 次命中，跟上对手换瞄准解）——BasicGFSurfer 70%→**83%** 主要来自这一项；
+  - 试过并**放弃**：KDE 近邻按特征距离加权 1/(1+√d)（testbed 掉 1%，回退）；
+  - **达标验证**：3 轮 50 回合 testbed 平均 **85.3% / 86.6% / 87.8%**（目标 85+ ✓）；3×100 平均：BasicGFSurfer **83%**、Komarious **66%**、Cigaret **61%**（无 problem bot <60% ✓，Cigaret 贴线待攻坚）；0 skipped turns，`shadowPieces/gunheatWaves` 计数已入 `stats.txt`。
+- **阶段 1（第 3–8 周，目标前 20 / ~87–88 APS）——全部完成**：~~precise prediction + precise intersection~~ → ~~距离控制 + wall smoothing~~ → ~~KNN 双枪（通用 + anti-surfer）~~ → ~~能量管理（基础 power ~1.95 规则）~~ → ~~被动 bullet shadows + gunheat waves~~。
 - **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）→ 期望得分最大化能量管理 → 主动子弹阴影（active bullet shadowing）→ flattener（约 9% 命中率门控）。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
