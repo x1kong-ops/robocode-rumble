@@ -131,6 +131,7 @@ public class Wavelet extends AdvancedRobot {
     public void onRoundEnded(RoundEndedEvent e) {
         out.println("round " + (getRoundNum() + 1) + "/" + getNumRounds()
                 + " | knn data: " + KnnGun.dataSize()
+                + " | " + KnnGun.gunStats()
                 + " | skipped turns (battle): " + skippedTurns);
     }
 
@@ -143,6 +144,7 @@ public class Wavelet extends AdvancedRobot {
             ps.println("skippedTurns=" + skippedTurns);
             ps.println("wallHits=" + wallHits);
             ps.println("knnData=" + KnnGun.dataSize());
+            ps.println(KnnGun.gunStats().replace(' ', '\n'));
             ps.close();
         } catch (Exception ignored) {
             // 统计写不出去不影响对战

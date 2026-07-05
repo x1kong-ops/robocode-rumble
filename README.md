@@ -10,8 +10,8 @@
 docs/roborumble-research-report.md   深度研究报告（榜单快照、顶级机器人剖析、算法谱系、路线图）
 src/rcr/Wavelet.java                 主力机器人：事件路由 / 雷达锁 / 能量簿记 / 健康指标
 src/rcr/Surfing.java                 True Surfing 走位（两波链式精确预测 + 精确交点 + GF 统计）
-src/rcr/KnnGun.java                  KNN(DC) 单枪（tick 虚拟波 + 核密度估计瞄准 + 火力选择）
-src/rcr/Knn.java                     KNN 样本库（线性扫描版，接口可平滑换 kd-tree）
+src/rcr/KnnGun.java                  KNN(DC) 双枪（通用 + anti-surfer，虚拟枪框架选枪）+ 火力选择
+src/rcr/Knn.java                     KNN 样本库（线性扫描，带样本权重/序号/环形淘汰）
 src/rcr/RcMath.java                  几何 / 物理 / 墙壁平滑公用函数
 src/rcr/Snapshot.java                双方状态快照（敌波回溯用）
 src/rcr/GeomTest.java                精确交点的暴力采样自检（java -cp out\classes;robocode.jar rcr.GeomTest）
@@ -61,7 +61,13 @@ GUI 观战：打开 Robocode，新建对战选 `rcr.Wavelet dev`（开 Paint 可
   - 试过并**放弃**的方案（各跑 100 回合×2-3 场 A/B，均不如当前组合）：wall stick 随速度收缩（低速撞墙无伤害 → 模拟看不到代价 → 诱导贴墙，撞墙数从 <10 暴涨到 50+）；激进后撤角 0.5–0.75 rad（走位变径向，反而更好打）；Diamond 全套危险公式（÷时间到达 + 命中率基线 + 期望距离 650，Komarious 掉到 52%）；
   - 3 场 100 回合平均：vs BasicGFSurfer **70%**（1.1 基线三场平均 67%）；vs Komarious **59%**（58%）；50 回合 testbed 平均 **83.6%**，GouldingiHT 99% / DuelistMini 84% / 三个 sample 98-100%，对贴身流（RamFire 99%、GouldingiHT、Tracker 100%）存活满分 5000/5000；
   - 结论：1.1 的动态 wall stick + 撞墙伤害计入已覆盖大部分收益，1.2 的增量主要在贴身流对手的存活与俯冲边界情形。
-- **阶段 1（第 3–8 周，目标前 20 / ~87–88 APS）**：~~precise prediction + precise intersection~~ → ~~距离控制 + wall smoothing~~ → KNN 双枪（通用 + anti-surfer）→ 能量管理（基础 power ~1.95 规则）→ 被动 bullet shadows + gunheat waves。
+- **阶段 1.3 KNN 双枪（通用 + anti-surfer）——已完成（2026-07-05）**：
+  - **通用枪**：大容量（6 万环形）全量数据、无衰减、开火/虚拟波同权——打非自适应走位；
+  - **anti-surfer 枪**：只信最近数据——小容量环形缓冲（2000）+ 样本年龄指数衰减（半衰期 300 条 ≈ 1/3 回合），虚拟波权重 0.05（冲浪者只对真子弹躲避学习，虚拟波里几乎没有它的躲避反应）；
+  - **虚拟枪框架**：每个真实开火波记下两把枪当时的预测 GF，波到达时按核距离记衰减软分（比二值命中 EMA 稳）；通用枪为默认，AS 枪须领先 0.05 且 ≥50 个开火波才接管——分差在噪声带内时换枪只会两头吃亏（margin 0.01 版实测反而更差）；
+  - 3 场 100 回合平均：vs BasicGFSurfer **74%**（1.2 基线 70%）；vs Komarious 58%（59%，噪声内持平，AS 枪对它很少接管）；50 回合 testbed 平均 **83.9%**，Cigaret 54%→**64%**；
+  - 健康自检：0 skipped turns（每 tick 双库查询无压力）；对非冲浪对手（DuelistMini / RamFire）`asFired=0`——AS 枪从不无谓接管。诊断量 `gunMain/gunAS/asFired` 已写入 `stats.txt`。
+- **阶段 1（第 3–8 周，目标前 20 / ~87–88 APS）**：~~precise prediction + precise intersection~~ → ~~距离控制 + wall smoothing~~ → ~~KNN 双枪（通用 + anti-surfer）~~ → 能量管理（基础 power ~1.95 规则）→ 被动 bullet shadows + gunheat waves。
 - **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）→ 期望得分最大化能量管理 → 主动子弹阴影（active bullet shadowing）→ flattener（约 9% 命中率门控）。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
