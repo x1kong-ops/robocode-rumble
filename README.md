@@ -10,7 +10,8 @@
 docs/roborumble-research-report.md   深度研究报告（榜单快照、顶级机器人剖析、算法谱系、路线图）
 src/rcr/Wavelet.java                 主力机器人：事件路由 / 雷达锁 / 能量簿记 / 健康指标
 src/rcr/Surfing.java                 True Surfing 走位（两波链式精确预测 + 精确交点 + GF 统计）
-src/rcr/KnnGun.java                  KNN(DC) 双枪（通用 + anti-surfer，虚拟枪框架选枪）+ 火力选择
+src/rcr/KnnGun.java                  KNN(DC) 双枪（通用 + anti-surfer，虚拟枪框架选枪）
+src/rcr/PowerSelector.java           火力选择：期望得分最大化（BeepBoop 模型移植）
 src/rcr/Knn.java                     KNN 样本库（线性扫描，带样本权重/序号/环形淘汰）
 src/rcr/RcMath.java                  几何 / 物理 / 墙壁平滑公用函数
 src/rcr/Snapshot.java                双方状态快照（敌波回溯用）
@@ -100,7 +101,13 @@ python ml\eval_per_enemy.py                    # 按对手分解对比手工/学
   - **离线验证**（留出场，与运行时一致的硬 KNN top-50 + KDE 峰值，车身窗口命中率）：整体 **0.322 → 0.341（+5.7%）**；11 个对手 8 升 3 微降（SpinBot +0.133、BasicGFSurfer +0.030、Komarious +0.028；微降的是本就 0.8+ 的 Tracker/RamFire 和 Walls）。学到的口径：bft 和接近速度权重大幅上调，|横向速度|/加速度大幅下调；
   - **实战验证**：3×100 平均 vs BasicGFSurfer **87%**（1.5 基线 83%）、Komarious **66.7%**（66%）、Cigaret **62.7%**（61%）、DuelistMini 83%（84%，噪声内）；50 回合 testbed **86.8%**（85.3–87.8 带内）。冲浪/躲避系全线不掉、标杆对手 +4，改进立住；
   - **走位权重**：当前走位统计是 3×3 分段 bin 而非 KNN，没有嵌入可学——留到把走位统计升级成 KNN 型（或 flattener）时一并学，与「瞄准优先，其次走位」的优先级一致。
-- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）~~ → 期望得分最大化能量管理 → 主动子弹阴影（active bullet shadowing）→ flattener（约 9% 命中率门控）→ 走位统计 KNN 化 + 嵌入权重学习。
+- **阶段 2.2 能量管理升级为期望得分最大化（BeepBoop 路线）——已完成（2026-07-05）**：
+  - **模型**（`PowerSelector.java`，移植 BeepBoop `BulletPowerSelector`）：对每档候选功率，假设双方按当前命中率持续对射——(1) 每 tick 能量流（开火消耗 p/冷却期、命中返还 3p、被弹伤害）线性估计回合剩余时长；(2) 拉格朗日乘子解出「打平能量战」的临界命中率组合，二项分布正态近似算双方越线概率 → 回合胜率；(3) 期望得分 = 伤害 ×(1+0.2×胜率) + 60×胜率，**前 5 回合按 APS 百分比口径（含跨回合累计近似分）取比值、之后取差值**，选期望最高的功率；
+  - **双方命中率跟踪**：`Tracker` 带先验 1/12、按逃逸角折算到候选功率（敌方命中率另设 ≤0.15 且不高于我方的开局假设）；敌方射击结算接进波系统（命中/飞过/对撞），gunheat 预测波不计；
+  - **候选功率门控**（BeepBoop 的 antiBasicSurfer 开关）：第 0 回合或命中率置信上界 >0.2 用 **ABS 粗表** {2.45⁻,1.95,1.45,0.95,0.65,0.45,0.15}（x.45/x.95 下沿利用 BasicSurfer 系子弹速度取整 bug，榜上大量机器人中招）；躲得好的对手（上界 ≤0.2）换 37 档细表做能量战优化。A/B 实测：细表打 BasicGFSurfer 掉 4-5%（丢掉 bug 利用），纯 ABS 表打 Komarious 掉 2-3%（丢掉细粒度省弹）——**门控两头都要**；
+  - 保留硬规则：<140 全功率 2.95、精确击杀反解、<5 能量不打让出能量领先的子弹（1.4 的 ≥33%/≥50% 命中率阈值、能量差缩放规则全部退役，由模型统一接管）；未移植：tryToDisable（打残后撞击补分）、镜像/护盾策略联动；
+  - **实测（3×100 平均）**：Komarious 66.7% → **69.7%**（模型对省弹型对手会自动降功率拖能量战）；BasicGFSurfer 86.3%（87.0%，持平）；DuelistMini 83.7%（83.0%，持平）；Cigaret 61.3%（62.7%，方差带内）；sample 系（RamFire/SpinBot/Fire）99-100% 无回归；0 skipped turns；`pwrMy/pwrEn/powerHist` 已入 `stats.txt`。
+- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）~~ → ~~期望得分最大化能量管理~~ → 主动子弹阴影（active bullet shadowing）→ flattener（约 9% 命中率门控）→ 走位统计 KNN 化 + 嵌入权重学习。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
 

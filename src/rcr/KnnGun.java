@@ -138,8 +138,10 @@ final class KnnGun {
 
         breakWaves(enemyLocation, time);
 
-        double power = choosePower(robot.getEnergy(), enemyEnergy, distance,
-                myHitRate(), myShots);
+        double rawPower = PowerSelector.choosePower(robot.getEnergy(), enemyEnergy, distance,
+                surfing.lastEnemyPower(), robot.getRoundNum(), robot.getGunCoolingRate());
+        boolean fireAllowed = rawPower >= 0.0995;
+        double power = RcMath.limit(0.1, rawPower, 3.0);
         double bulletSpeed = RcMath.bulletSpeed(power);
         double mea = RcMath.maxEscapeAngle(bulletSpeed);
         double bft = distance / bulletSpeed;
@@ -178,8 +180,9 @@ final class KnnGun {
         robot.setTurnGunRightRadians(
                 Utils.normalRelativeAngle(fireAngle - robot.getGunHeadingRadians()));
 
-        if (robot.getGunHeat() == 0
-                && robot.getEnergy() > power + 0.1
+        if (fireAllowed
+                && robot.getGunHeat() == 0
+                && robot.getEnergy() > power + 0.05
                 && Math.abs(robot.getGunTurnRemainingRadians()) < Math.atan(18 / distance)) {
             Bullet b = robot.setFireBullet(power);
             if (b != null) {
@@ -310,40 +313,4 @@ final class KnnGun {
         return 1;
     }
 
-    /**
-     * 火力选择（阶段 1.4 规则版，参考 DrussGT 的基础 1.95 逻辑）：
-     * - 基础 1.95；
-     * - 打得准才打重：整场命中率 ≥50% → 2.95、≥33% → 2.45。阈值必须高：命中率 >1/3
-     *   开火才是能量正回报（3p 返还 > p 成本），且重弹更慢 → 对手逃逸角更大更好躲——
-     *   实测阈值 0.25 / 滚动窗口都会被冲浪对手误触发，全线回退；
-     * - 近距离压制：<140 → 2.95（这个距离基本必中）；
-     * - 能量差缩放：中远距离落后越多越省（每落后 1 点降 0.02，下限 1.2），拖长回合等对手先垮，
-     *   但只在 deficit>10 且非贴身时生效——别过度保守；
-     * - 击杀经济：正好打死即可（p≤1 伤 4p；p>1 伤 6p−2，反解）；
-     * - 低能量护栏：<20 能量按 1/10 收缩，防自我 disable。
-     */
-    static double choosePower(double myEnergy, double enemyEnergy, double distance,
-                              double hitRate, int shots) {
-        double power = 1.95;
-        if (shots >= 20) {
-            if (hitRate >= 0.5) {
-                power = 2.95;
-            } else if (hitRate >= 0.33) {
-                power = 2.45;
-            }
-        }
-        if (distance < 140) {
-            power = 2.95;
-        }
-        double deficit = enemyEnergy - myEnergy;
-        if (deficit > 10 && distance > 300) {
-            power = Math.min(power, Math.max(1.2, 1.95 - 0.02 * (deficit - 10)));
-        }
-        if (myEnergy < 20) {
-            power = Math.min(power, Math.max(0.1, myEnergy / 10));
-        }
-        double killPower = enemyEnergy > 4 ? (enemyEnergy + 2) / 6 : enemyEnergy / 4;
-        power = Math.min(power, killPower);
-        return RcMath.limit(0.1, Math.min(power, myEnergy - 0.1), 3.0);
-    }
 }

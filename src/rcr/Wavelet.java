@@ -9,6 +9,7 @@ import robocode.BattleEndedEvent;
 import robocode.BulletHitBulletEvent;
 import robocode.BulletHitEvent;
 import robocode.BulletMissedEvent;
+import robocode.DeathEvent;
 import robocode.HitByBulletEvent;
 import robocode.HitRobotEvent;
 import robocode.HitWallEvent;
@@ -17,6 +18,7 @@ import robocode.RoundEndedEvent;
 import robocode.Rules;
 import robocode.ScannedRobotEvent;
 import robocode.SkippedTurnEvent;
+import robocode.WinEvent;
 import robocode.util.Utils;
 
 /**
@@ -36,6 +38,8 @@ public class Wavelet extends AdvancedRobot {
     private double enemyEnergy = 100;
     private Snapshot prev;
     private int myLateralDirection = 1;
+    private boolean roundWon;
+    private boolean roundDied;
 
     @Override
     public void run() {
@@ -96,15 +100,16 @@ public class Wavelet extends AdvancedRobot {
         enemyEnergy += 3 * e.getBullet().getPower(); // 命中返还能量
         surfing.onBulletContact(
                 new Point2D.Double(e.getBullet().getX(), e.getBullet().getY()),
-                e.getBullet().getVelocity(), getTime());
+                e.getBullet().getVelocity(), e.getBullet().getPower(), true, getTime());
     }
 
     @Override
     public void onBulletHitBullet(BulletHitBulletEvent e) {
         surfing.onBulletContact(
                 new Point2D.Double(e.getHitBullet().getX(), e.getHitBullet().getY()),
-                e.getHitBullet().getVelocity(), getTime());
+                e.getHitBullet().getVelocity(), e.getHitBullet().getPower(), false, getTime());
         surfing.onMyBulletDeath(e.getBullet(), getTime());
+        PowerSelector.MY.shotPassed(e.getBullet().getPower(), false);
     }
 
     @Override
@@ -112,11 +117,23 @@ public class Wavelet extends AdvancedRobot {
         enemyEnergy -= Rules.getBulletDamage(e.getBullet().getPower());
         KnnGun.onMyBulletHit();
         surfing.onMyBulletDeath(e.getBullet(), getTime());
+        PowerSelector.MY.shotPassed(e.getBullet().getPower(), true);
     }
 
     @Override
     public void onBulletMissed(BulletMissedEvent e) {
         surfing.onMyBulletDeath(e.getBullet(), getTime());
+        PowerSelector.MY.shotPassed(e.getBullet().getPower(), false);
+    }
+
+    @Override
+    public void onWin(WinEvent e) {
+        roundWon = true;
+    }
+
+    @Override
+    public void onDeath(DeathEvent e) {
+        roundDied = true;
     }
 
     @Override
@@ -138,9 +155,11 @@ public class Wavelet extends AdvancedRobot {
 
     @Override
     public void onRoundEnded(RoundEndedEvent e) {
+        PowerSelector.roundEnd(roundWon, roundDied);
         out.println("round " + (getRoundNum() + 1) + "/" + getNumRounds()
                 + " | knn data: " + KnnGun.dataSize()
                 + " | " + KnnGun.gunStats()
+                + " | " + PowerSelector.stats()
                 + " | skipped turns (battle): " + skippedTurns);
     }
 
@@ -155,6 +174,7 @@ public class Wavelet extends AdvancedRobot {
             ps.println("knnData=" + KnnGun.dataSize());
             ps.println(KnnGun.gunStats().replace(' ', '\n'));
             ps.println(Surfing.surfStats().replace(' ', '\n'));
+            ps.println(PowerSelector.stats().replace(' ', '\n'));
             ps.close();
         } catch (Exception ignored) {
             // 统计写不出去不影响对战

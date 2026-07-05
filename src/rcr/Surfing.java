@@ -157,6 +157,11 @@ final class Surfing {
         return "shadowPieces=" + shadowPieces + " gunheatWaves=" + gunheatWaves;
     }
 
+    /** 敌人最近一次开火功率（未观测到开火时为默认 1.9），PowerSelector 建模用。 */
+    double lastEnemyPower() {
+        return lastEnemyPower;
+    }
+
     // ===================== 波管理 =====================
 
     /** 每个扫描 tick 调用：检测到开火则建波，然后推进波并执行冲浪。 */
@@ -225,6 +230,9 @@ final class Surfing {
             EnemyWave w = it.next();
             w.distanceTraveled = (cur.time - w.fireTime) * w.speed;
             if (w.distanceTraveled > w.origin.distance(cur.myLocation) + 50) {
+                if (!w.imaginary) {
+                    PowerSelector.ENEMY.shotPassed(w.power, false); // 飞过 = 没打中我
+                }
                 it.remove();
             }
         }
@@ -273,7 +281,8 @@ final class Surfing {
     }
 
     /** 被子弹命中 / 子弹对撞时调用：找到对应敌波，记录命中 GF 并移除。 */
-    void onBulletContact(Point2D.Double hitLocation, double bulletVelocity, long time) {
+    void onBulletContact(Point2D.Double hitLocation, double bulletVelocity,
+                         double bulletPower, boolean hitMe, long time) {
         EnemyWave match = null;
         double bestDiff = 50;
         for (EnemyWave w : waves) {
@@ -287,6 +296,7 @@ final class Surfing {
                 match = w;
             }
         }
+        PowerSelector.ENEMY.shotPassed(match != null ? match.power : bulletPower, hitMe);
         if (match != null) {
             logHit(match, hitLocation);
             waves.remove(match);
