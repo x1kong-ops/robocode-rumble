@@ -3,6 +3,7 @@ package rcr;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 
@@ -169,10 +170,20 @@ final class KnnGun {
         w.features = f;
 
         double bandwidth = Math.max(0.02, Math.atan(18 / distance) / mea);
-        w.gfMain = aim(MAIN_DATA, f, MAIN_K, bandwidth, 0);
-        w.gfAs = aim(AS_DATA, f, AS_K, bandwidth, AS_HALF_LIFE);
+        Kde kdeMain = kde(MAIN_DATA, f, MAIN_K, bandwidth, 0);
+        Kde kdeAs = kde(AS_DATA, f, AS_K, bandwidth, AS_HALF_LIFE);
+        w.gfMain = kdeMain.bestGf();
+        w.gfAs = kdeAs.bestGf();
         boolean useAs = useAsGun();
         double gf = useAs ? w.gfAs : w.gfMain;
+
+        // 主动子弹阴影：临开火（≤1 tick 枪冷）时在候选角里选「命中分 / 冲浪危险^β」最优
+        boolean nearFire = robot.getGunHeat() <= robot.getGunCoolingRate() + 1e-9
+                && robot.getEnergy() > power && fireAllowed;
+        if (nearFire) {
+            gf = activeShadowGf(useAs ? kdeAs : kdeMain, gf, myLocation, absBearing,
+                    mea, bulletSpeed, power, time);
+        }
         waves.add(w);
 
         double fireAngle = Utils.normalAbsoluteAngle(
@@ -229,13 +240,80 @@ final class KnnGun {
         }
     }
 
+    /** 近邻核密度估计的可查询快照：任意 GF 的密度 + 峰值 + 高分候选（主动阴影用）。 */
+    private static final class Kde {
+        final double[] gf;
+        final double[] wgt;
+        final double bandwidth;
+
+        Kde(double[] gf, double[] wgt, double bandwidth) {
+            this.gf = gf;
+            this.wgt = wgt;
+            this.bandwidth = bandwidth;
+        }
+
+        double density(double x) {
+            double score = 0;
+            for (int j = 0; j < gf.length; j++) {
+                double z = (x - gf[j]) / bandwidth;
+                score += wgt[j] * Math.exp(-0.5 * z * z);
+            }
+            return score;
+        }
+
+        double bestGf() {
+            double best = 0, bestScore = -1;
+            for (double x : gf) {
+                double s = density(x);
+                if (s > bestScore) {
+                    bestScore = s;
+                    best = x;
+                }
+            }
+            return best;
+        }
+
+        /** 按密度降序取至多 n 个彼此间隔 ≥minGap 的近邻 GF。 */
+        List<Double> topCandidates(int n, double minGap) {
+            Integer[] idx = new Integer[gf.length];
+            final double[] dens = new double[gf.length];
+            for (int i = 0; i < gf.length; i++) {
+                idx[i] = i;
+                dens[i] = density(gf[i]);
+            }
+            java.util.Arrays.sort(idx, new Comparator<Integer>() {
+                @Override
+                public int compare(Integer a, Integer b) {
+                    return Double.compare(dens[b], dens[a]);
+                }
+            });
+            List<Double> out = new ArrayList<Double>();
+            for (Integer i : idx) {
+                boolean dup = false;
+                for (double x : out) {
+                    if (Math.abs(x - gf[i]) < minGap) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (!dup) {
+                    out.add(gf[i]);
+                    if (out.size() >= n) {
+                        break;
+                    }
+                }
+            }
+            return out;
+        }
+    }
+
     /**
-     * 加权核密度估计：在近邻的 GF 中选密度峰值。
-     * 每个近邻的贡献 = 先验权重 × 特征距离权重 1/(1+√d) ×（可选）年龄衰减 0.5^(age/halfLife)。
+     * 加权核密度估计快照。
+     * 每个近邻的贡献 = 先验权重 ×（可选）年龄衰减 0.5^(age/halfLife)。
      */
-    private static double aim(Knn data, double[] query, int k, double bandwidth, double halfLife) {
+    private static Kde kde(Knn data, double[] query, int k, double bandwidth, double halfLife) {
         if (data.size() == 0) {
-            return 0;
+            return new Kde(new double[]{0}, new double[]{1}, bandwidth);
         }
         List<Knn.Neighbor> neighbors = data.nearest(query, Math.min(k, data.size()));
         int n = neighbors.size();
@@ -249,18 +327,61 @@ final class KnnGun {
                 wgt[i] *= Math.pow(0.5, (data.seq() - nb.entry.seq) / halfLife);
             }
         }
-        double bestGf = 0;
-        double bestScore = -1;
-        for (int i = 0; i < n; i++) {
-            double score = 0;
-            for (int j = 0; j < n; j++) {
-                double z = (gf[i] - gf[j]) / bandwidth;
-                score += wgt[j] * Math.exp(-0.5 * z * z);
+        return new Kde(gf, wgt, bandwidth);
+    }
+
+    /**
+     * 主动子弹阴影（阶段 2.3，BeepBoop Aimer 思路）：临开火 tick 在「KDE 高分候选 +
+     * 有用阴影角」里选 aimScore / danger^β 最优的开火 GF。danger = 假想这发子弹铺出
+     * 阴影后我当前走位方案的冲浪危险；β 随敌我命中率比和功率比缩放——对手打不中我
+     * 或只打小弹时，少为阴影牺牲命中率。
+     */
+    private double activeShadowGf(Kde kde, double gfAim, Point2D.Double myLocation,
+                                  double absBearing, double mea, double bulletSpeed,
+                                  double power, long time) {
+        double baseline = surfing.currentPlanDanger(time);
+        if (baseline < 0) {
+            return gfAim; // 没有在冲的波，阴影无从谈起
+        }
+        List<Double> candidates = kde.topCandidates(8, 0.04);
+        if (!candidates.contains(gfAim)) {
+            candidates.add(0, gfAim);
+        }
+        for (double angle : surfing.helpfulShadowAngles(myLocation, bulletSpeed, time)) {
+            double gf = Utils.normalRelativeAngle(angle - absBearing)
+                    / mea * enemyLateralDirection;
+            if (Math.abs(gf) < 0.99) {
+                candidates.add(gf);
             }
+        }
+        double beta = Math.pow(
+                PowerSelector.ENEMY.rawHitRate() / PowerSelector.MY.rawHitRate()
+                        * surfing.lastEnemyPower() / power, 0.25);
+        // 命中分下限：阴影再好也不打「几乎不可能命中」的子弹——能量战里白扔一发的
+        // 代价（-p 无返还）对紧平衡对手（如 Komarious）是净亏，实测不设门全线回退
+        double aimFloor = 0.35 * kde.density(gfAim);
+        double bestScore = Double.NEGATIVE_INFINITY;
+        double bestGf = gfAim;
+        for (double gf : candidates) {
+            double aimScore = kde.density(gf);
+            if (aimScore < aimFloor && gf != gfAim) {
+                continue;
+            }
+            double fireAngle = Utils.normalAbsoluteAngle(
+                    absBearing + gf * mea * enemyLateralDirection);
+            double danger = surfing.dangerAfterHypotheticalShot(
+                    myLocation, fireAngle, bulletSpeed, time);
+            if (danger < 0) {
+                return gfAim;
+            }
+            double score = aimScore / Math.pow(Math.max(1e-6, danger), beta);
             if (score > bestScore) {
                 bestScore = score;
-                bestGf = gf[i];
+                bestGf = gf;
             }
+        }
+        if (Math.abs(bestGf - gfAim) > 0.01) {
+            Surfing.noteActiveShadowShot();
         }
         return bestGf;
     }

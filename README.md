@@ -107,7 +107,15 @@ python ml\eval_per_enemy.py                    # 按对手分解对比手工/学
   - **候选功率门控**（BeepBoop 的 antiBasicSurfer 开关）：第 0 回合或命中率置信上界 >0.2 用 **ABS 粗表** {2.45⁻,1.95,1.45,0.95,0.65,0.45,0.15}（x.45/x.95 下沿利用 BasicSurfer 系子弹速度取整 bug，榜上大量机器人中招）；躲得好的对手（上界 ≤0.2）换 37 档细表做能量战优化。A/B 实测：细表打 BasicGFSurfer 掉 4-5%（丢掉 bug 利用），纯 ABS 表打 Komarious 掉 2-3%（丢掉细粒度省弹）——**门控两头都要**；
   - 保留硬规则：<140 全功率 2.95、精确击杀反解、<5 能量不打让出能量领先的子弹（1.4 的 ≥33%/≥50% 命中率阈值、能量差缩放规则全部退役，由模型统一接管）；未移植：tryToDisable（打残后撞击补分）、镜像/护盾策略联动；
   - **实测（3×100 平均）**：Komarious 66.7% → **69.7%**（模型对省弹型对手会自动降功率拖能量战）；BasicGFSurfer 86.3%（87.0%，持平）；DuelistMini 83.7%（83.0%，持平）；Cigaret 61.3%（62.7%，方差带内）；sample 系（RamFire/SpinBot/Fire）99-100% 无回归；0 skipped turns；`pwrMy/pwrEn/powerHist` 已入 `stats.txt`。
-- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）~~ → ~~期望得分最大化能量管理~~ → 主动子弹阴影（active bullet shadowing）→ flattener（约 9% 命中率门控）→ 走位统计 KNN 化 + 嵌入权重学习。
+- **阶段 2.3 主动子弹阴影（active bullet shadowing，BeepBoop Aimer 思路）——已完成（2026-07-05）**：
+  - **机制**：临开火 tick（枪冷 ≤1 tick 且允许开火）不再直接打 KDE 峰值，而是在候选开火 GF 里选 `aimScore / danger^β` 最优者。候选 = KDE 高分近邻 GF（top-8、间隔 ≥0.04）+「有用阴影角」（解二次方程求能拦截「瞄着我预测被扫位置的敌方子弹」的开火角，即在我将经过的 GF 上挡出阴影）；
+  - **danger 假设检验**：冲浪评估每 tick 缓存三选项 ×（第一/第二波）的精确覆盖窗口与撞墙/俯冲因子，对每个候选角用 `shadowIntervals` 算假想阴影、重算窗口质量（`dangerAfterHypotheticalShot`），取三选项最小——即「这发子弹铺出阴影后我的走位有多安全」；
+  - **权重 β** = (敌命中率/我命中率 × 敌功率/我功率)^0.25：对手打不中我或只打小弹时少为阴影牺牲命中率（复用 2.2 的 PowerSelector.Tracker）；
+  - **护栏**：候选命中分 <0.35× 峰值直接弃——能量战里白扔一发对紧平衡对手是净亏（不设门实测 Komarious −4）；
+  - 试过并**放弃**：β 前置系数 2（BeepBoop 原值，我们的 danger 口径含 ε 底数，对比度比它的 bin 危险大，系数 2 过度让利命中率）；炮管本 tick 可达候选 ×1.1（BeepBoop 有，我们实测 BasicGFSurfer −2 回退）；
+  - **实测（v4 定稿，6×100 平均）**：BasicGFSurfer 86.3% → **87.0%**（含单场 90 峰值；主动阴影收益本就集中在强 surfer）；Komarious 67.0%、Cigaret 61.0%、DuelistMini 82.7%（均在方差带内）；sample 系 99-100%；**0 skipped turns**（每 tick 12 次精确预测 + 临开火 ≤10 次假想阴影重算，CPU 仍有余量）；`activeShadowShots`（改角次数，Komarious 300 回合 ≈800 次 ≈8% 射击）已入 `stats.txt`；
+  - 注：本地 testbed 对 rumble 全场分布低估此项——榜上 surfer 密度远高于我们 8 bot 组，Kev 点名该创新「对强 surfer 收益最大」。
+- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）~~ → ~~期望得分最大化能量管理~~ → ~~主动子弹阴影（active bullet shadowing）~~ → flattener（约 9% 命中率门控）→ 走位统计 KNN 化 + 嵌入权重学习。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
 

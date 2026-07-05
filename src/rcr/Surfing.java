@@ -120,6 +120,33 @@ final class Surfing {
         }
     }
 
+    /**
+     * 本 tick 冲浪评估的缓存（主动阴影假设检验用）：
+     * 单个 (选项, 波) 的覆盖窗口 + 撞墙伤害 + 俯冲因子。质量可在之后带假想阴影重算。
+     */
+    private static final class WaveWindow {
+        EnemyWave wave;
+        double minOff = Double.POSITIVE_INFINITY;
+        double maxOff = Double.NEGATIVE_INFINITY;
+        double wallDamage;
+        double dive;
+        Point2D.Double crossPos; // 波前扫到车身时的预测位置（主动阴影拦截点用）
+    }
+
+    private static final class OptionEval {
+        WaveWindow first;               // 第一波窗口
+        WaveWindow[] second;            // 该选项终点对应第二波的三个选项窗口（可为 null）
+    }
+
+    private final OptionEval[] lastEvals = new OptionEval[3];
+    private long lastEvalTime = -1;
+    // 当前最优走位方案在各波上的预测被扫位置（helpful shadow GF 用）
+    private EnemyWave targetWave1;
+    private Point2D.Double targetEnd1;
+    private EnemyWave targetWave2;
+    private Point2D.Double targetEnd2;
+    private static int activeShadowShots; // 诊断：主动阴影改变开火角的次数
+
     /** 精确预测用的自身运动状态。 */
     private static final class MoveState {
         Point2D.Double pos;
@@ -140,8 +167,7 @@ final class Surfing {
     }
 
     private static final class Prediction {
-        double hitMass;    // 精确覆盖窗口的统计质量（未乘伤害）
-        double wallDamage; // 模拟途中的撞墙伤害
+        WaveWindow window; // 覆盖窗口 + 撞墙伤害 + 俯冲因子（质量可带假想阴影重算）
         MoveState end;     // 波完全越过车身后的状态，作为下一波预测的起点
     }
 
@@ -154,7 +180,8 @@ final class Surfing {
     }
 
     static String surfStats() {
-        return "shadowPieces=" + shadowPieces + " gunheatWaves=" + gunheatWaves;
+        return "shadowPieces=" + shadowPieces + " gunheatWaves=" + gunheatWaves
+                + " activeShadowShots=" + activeShadowShots;
     }
 
     /** 敌人最近一次开火功率（未观测到开火时为默认 1.9），PowerSelector 建模用。 */
@@ -452,9 +479,10 @@ final class Surfing {
         }
     }
 
-    /** [lo,hi] GF 区间被该波阴影并集覆盖的比例。 */
-    private static double shadowedFraction(EnemyWave w, double lo, double hi) {
-        if (w.shadows.isEmpty() || hi - lo < 1e-12) {
+    /** [lo,hi] GF 区间被「该波阴影 ∪ extra 假想阴影」并集覆盖的比例。 */
+    private static double shadowedFraction(EnemyWave w, double lo, double hi,
+                                           List<double[]> extra) {
+        if ((w.shadows.isEmpty() && (extra == null || extra.isEmpty())) || hi - lo < 1e-12) {
             return 0;
         }
         List<double[]> xs = new ArrayList<double[]>();
@@ -463,6 +491,15 @@ final class Surfing {
             double b = Math.min(hi, s.gfHigh);
             if (b > a) {
                 xs.add(new double[]{a, b});
+            }
+        }
+        if (extra != null) {
+            for (double[] s : extra) {
+                double a = Math.max(lo, s[0]);
+                double b = Math.min(hi, s[1]);
+                if (b > a) {
+                    xs.add(new double[]{a, b});
+                }
             }
         }
         if (xs.isEmpty()) {
@@ -548,12 +585,11 @@ final class Surfing {
         return wallDamage;
     }
 
-    /** 从 start 沿 option 冲浪波 w，模拟到 w 完全越过车身，收集覆盖窗口质量与撞墙伤害。 */
+    /** 从 start 沿 option 冲浪波 w，模拟到 w 完全越过车身，收集覆盖窗口与撞墙伤害。 */
     private Prediction predictOption(MoveState start, EnemyWave w, int option, Point2D.Double enemy) {
         MoveState s = start.copy();
-        double minOff = Double.POSITIVE_INFINITY;
-        double maxOff = Double.NEGATIVE_INFINITY;
-        double wallPenalty = 0;
+        WaveWindow ww = new WaveWindow();
+        ww.wave = w;
         int guard = 0;
         while (guard++ < 400) {
             double rNow = (s.time - w.fireTime) * w.speed;
@@ -562,19 +598,25 @@ final class Surfing {
                 break; // 波已完全越过车身
             }
             if (rNow + w.speed >= dist - HALF_DIAGONAL) {
+                if (ww.crossPos == null) {
+                    ww.crossPos = new Point2D.Double(s.pos.x, s.pos.y);
+                }
                 // 下一 tick 子弹扫过 [rNow, rNow+speed]，碰撞用当前位置的车身
                 double[] iv = annulusSquareOffsets(w, Math.max(0, rNow), rNow + w.speed, s.pos);
                 if (iv != null) {
-                    minOff = Math.min(minOff, iv[0]);
-                    maxOff = Math.max(maxOff, iv[1]);
+                    ww.minOff = Math.min(ww.minOff, iv[0]);
+                    ww.maxOff = Math.max(ww.maxOff, iv[1]);
                 }
             }
-            wallPenalty += step(s, w, option, enemy);
+            ww.wallDamage += step(s, w, option, enemy);
         }
         Prediction p = new Prediction();
         p.end = s;
-        p.hitMass = minOff <= maxOff ? intervalMass(w, minOff, maxOff) : 0;
-        p.wallDamage = wallPenalty;
+        if (ww.crossPos == null) {
+            ww.crossPos = new Point2D.Double(s.pos.x, s.pos.y);
+        }
+        ww.dive = RcMath.limit(1, DIVE_PROTECT_DISTANCE / s.pos.distance(enemy), 3);
+        p.window = ww;
         return p;
     }
 
@@ -583,10 +625,14 @@ final class Surfing {
      *   (覆盖质量 × 子弹伤害 + ε) × 俯冲因子 + 撞墙伤害
      * ε 让「零窗口完全躲开」的选项之间仍按距离分优劣——精确交点下俯冲保护必须这样做，
      * 否则一个贴脸但恰好躲开本波的选项会拿到干净的 0 分、下一波直接送命。
+     * extra1/extra2 为对应波上的假想阴影（主动阴影评估用，平时传 null）。
      */
-    private double waveDanger(Prediction p, EnemyWave w, Point2D.Double enemy) {
-        double dive = RcMath.limit(1, DIVE_PROTECT_DISTANCE / p.end.pos.distance(enemy), 3);
-        return (p.hitMass * bulletDamage(w.power) + DANGER_EPSILON) * dive + p.wallDamage;
+    private double windowDanger(WaveWindow ww, EnemyWave wave1, List<double[]> extra1,
+                                EnemyWave wave2, List<double[]> extra2) {
+        List<double[]> extra = ww.wave == wave1 ? extra1 : ww.wave == wave2 ? extra2 : null;
+        double mass = ww.minOff <= ww.maxOff
+                ? intervalMass(ww.wave, ww.minOff, ww.maxOff, extra) : 0;
+        return (mass * bulletDamage(ww.wave.power) + DANGER_EPSILON) * ww.dive + ww.wallDamage;
     }
 
     /**
@@ -660,17 +706,21 @@ final class Surfing {
     }
 
     /** 角度窗口 → GF 窗口 → 覆盖 bin 的统计质量之和（bin 按阴影遮蔽比例打折）。 */
-    private static double intervalMass(EnemyWave w, double minOff, double maxOff) {
+    private static double intervalMass(EnemyWave w, double minOff, double maxOff,
+                                       List<double[]> extraShadows) {
         double mea = RcMath.maxEscapeAngle(w.speed);
         double gfA = RcMath.limit(-1, minOff / mea * w.direction, 1);
         double gfB = RcMath.limit(-1, maxOff / mea * w.direction, 1);
         int iLo = (int) Math.round(RcMath.limit(0, Math.min(gfA, gfB) * MID + MID, BINS - 1));
         int iHi = (int) Math.round(RcMath.limit(0, Math.max(gfA, gfB) * MID + MID, BINS - 1));
+        boolean anyShadow = !w.shadows.isEmpty()
+                || (extraShadows != null && !extraShadows.isEmpty());
         double mass = 0;
         for (int i = iLo; i <= iHi; i++) {
             double m = w.stats[i];
-            if (!w.shadows.isEmpty()) {
-                m *= 1 - shadowedFraction(w, (i - 0.5 - MID) / MID, (i + 0.5 - MID) / MID);
+            if (anyShadow) {
+                m *= 1 - shadowedFraction(w, (i - 0.5 - MID) / MID, (i + 0.5 - MID) / MID,
+                        extraShadows);
             }
             mass += m;
         }
@@ -685,7 +735,11 @@ final class Surfing {
 
     private void surf(Snapshot cur) {
         EnemyWave w1 = closestSurfableWave(cur.myLocation, cur.time);
+        lastEvalTime = cur.time;
+        targetWave1 = targetWave2 = null;
+        targetEnd1 = targetEnd2 = null;
         if (w1 == null) {
+            lastEvals[0] = lastEvals[1] = lastEvals[2] = null;
             idle(cur);
             return;
         }
@@ -693,27 +747,46 @@ final class Surfing {
                 robot.getHeadingRadians(), robot.getVelocity(), cur.time);
         Point2D.Double enemy = cur.enemyLocation;
 
-        // 平局时偏向保持当前方向，避免无谓抖动
+        // 平局时偏向保持当前方向，避免无谓抖动。三个选项全量评估（不剪枝），
+        // 缓存窗口供主动阴影做「假想开火后的危险」重算
         int[] order = {lastSurfDirection, 0, -lastSurfDirection};
         double bestDanger = Double.POSITIVE_INFINITY;
         int bestOption = lastSurfDirection;
-        for (int option : order) {
+        int bestIdx = 0;
+        for (int oi = 0; oi < 3; oi++) {
+            int option = order[oi];
             Prediction p1 = predictOption(now, w1, option, enemy);
-            double total = waveDanger(p1, w1, enemy);
-            if (total < bestDanger) { // 第二波只在第一波不落败时才需要算，先粗剪枝
-                EnemyWave w2 = closestSurfableWave(p1.end.pos, p1.end.time);
-                if (w2 != null && w2 != w1) {
-                    double best2 = Double.POSITIVE_INFINITY;
-                    for (int option2 : order) {
-                        Prediction p2 = predictOption(p1.end, w2, option2, enemy);
-                        best2 = Math.min(best2, waveDanger(p2, w2, enemy));
-                    }
-                    total += SECOND_WAVE_WEIGHT * best2;
+            OptionEval ev = new OptionEval();
+            ev.first = p1.window;
+            EnemyWave w2 = closestSurfableWave(p1.end.pos, p1.end.time);
+            if (w2 != null && w2 != w1) {
+                ev.second = new WaveWindow[3];
+                for (int oj = 0; oj < 3; oj++) {
+                    ev.second[oj] = predictOption(p1.end, w2, order[oj], enemy).window;
                 }
             }
+            lastEvals[oi] = ev;
+            double total = optionTotal(ev, null, null);
             if (total < bestDanger) {
                 bestDanger = total;
                 bestOption = option;
+                bestIdx = oi;
+            }
+        }
+
+        // 记录当前方案在各波上的预测被扫位置（helpful shadow 拦截点）
+        OptionEval chosen = lastEvals[bestIdx];
+        targetWave1 = w1;
+        targetEnd1 = chosen.first.crossPos;
+        if (chosen.second != null) {
+            double b2 = Double.POSITIVE_INFINITY;
+            for (WaveWindow sw : chosen.second) {
+                double d = windowDanger(sw, null, null, null, null);
+                if (d < b2) {
+                    b2 = d;
+                    targetWave2 = sw.wave;
+                    targetEnd2 = sw.crossPos;
+                }
             }
         }
 
@@ -730,6 +803,130 @@ final class Surfing {
             lastSurfDirection = bestOption;
             setBackAsFront(orbitAngle(w1.origin, cur.myLocation, enemy, bestOption), 100);
         }
+    }
+
+    /** 三选项冲浪总分（带可选假想阴影）：D1 + 0.5 × min D2。 */
+    private double optionTotal(OptionEval ev, List<double[]> extra1, List<double[]> extra2) {
+        EnemyWave wave1 = ev.first.wave;
+        EnemyWave wave2 = ev.second != null && ev.second[0] != null ? ev.second[0].wave : null;
+        double total = windowDanger(ev.first, wave1, extra1, wave2, extra2);
+        if (ev.second != null) {
+            double best2 = Double.POSITIVE_INFINITY;
+            for (WaveWindow sw : ev.second) {
+                best2 = Math.min(best2, windowDanger(sw, wave1, extra1, wave2, extra2));
+            }
+            total += SECOND_WAVE_WEIGHT * best2;
+        }
+        return total;
+    }
+
+    // ===================== 主动子弹阴影（阶段 2.3） =====================
+
+    /**
+     * 假想「本 tick 以 bulletSpeed 沿 fireAngle 开火」后，当前走位方案的冲浪危险。
+     * 用缓存的三选项窗口 + 假想子弹在两个目标波上的阴影区间重算，取三选项最小值。
+     * 返回值口径与 surf() 的 danger 一致，仅用于候选开火角之间的相对比较。
+     */
+    double dangerAfterHypotheticalShot(Point2D.Double origin, double fireAngle,
+                                       double bulletSpeed, long fireTime) {
+        if (lastEvalTime != fireTime || lastEvals[0] == null) {
+            return -1; // 本 tick 没有冲浪评估（无波），阴影无意义
+        }
+        List<double[]> extra1 = hypoShadow(targetWave1, origin, fireAngle, bulletSpeed, fireTime);
+        List<double[]> extra2 = hypoShadow(targetWave2, origin, fireAngle, bulletSpeed, fireTime);
+        double best = Double.POSITIVE_INFINITY;
+        for (OptionEval ev : lastEvals) {
+            if (ev != null) {
+                best = Math.min(best, optionTotal(ev, extra1, extra2));
+            }
+        }
+        return best;
+    }
+
+    /** 无假想开火时的基准危险（与 dangerAfterHypotheticalShot 同口径）。 */
+    double currentPlanDanger(long time) {
+        if (lastEvalTime != time || lastEvals[0] == null) {
+            return -1;
+        }
+        double best = Double.POSITIVE_INFINITY;
+        for (OptionEval ev : lastEvals) {
+            if (ev != null) {
+                best = Math.min(best, optionTotal(ev, null, null));
+            }
+        }
+        return best;
+    }
+
+    private List<double[]> hypoShadow(EnemyWave w, Point2D.Double origin, double fireAngle,
+                                      double bulletSpeed, long fireTime) {
+        if (w == null || w.imaginary) {
+            return null;
+        }
+        return shadowIntervals(w, origin, fireAngle, bulletSpeed, fireTime, fieldW, fieldH);
+    }
+
+    /**
+     * 「有用阴影」候选开火角（BeepBoop getHelpfulShadowGFs 思路）：解出能拦截
+     * 「敌波上瞄着我当前走位方案预测被扫位置的那颗子弹」的我方开火角——这发子弹
+     * 恰好在我将要经过的 GF 上挡出阴影。
+     */
+    List<Double> helpfulShadowAngles(Point2D.Double gunPos, double bulletSpeed, long fireTime) {
+        List<Double> out = new ArrayList<Double>();
+        if (lastEvalTime != fireTime) {
+            return out;
+        }
+        addInterceptAngle(out, targetWave1, targetEnd1, gunPos, bulletSpeed, fireTime);
+        addInterceptAngle(out, targetWave2, targetEnd2, gunPos, bulletSpeed, fireTime);
+        return out;
+    }
+
+    /**
+     * 敌方子弹沿 (波源 → target) 方向飞行，解「我 fireTime+1 起飞的子弹与它同 tick
+     * 等距相遇」的开火角：|O + dir(φ)·v·s_w − M| = (v + t_w − t_f)·s_b 关于 v 的二次方程。
+     */
+    private void addInterceptAngle(List<Double> out, EnemyWave w, Point2D.Double target,
+                                   Point2D.Double gunPos, double bulletSpeed, long fireTime) {
+        if (w == null || w.imaginary || target == null) {
+            return;
+        }
+        double phi = RcMath.absoluteBearing(w.origin, target);
+        double sx = Math.sin(phi) * w.speed;
+        double sy = Math.cos(phi) * w.speed;
+        double ox = w.origin.x - gunPos.x;
+        double oy = w.origin.y - gunPos.y;
+        double dt = w.fireTime - fireTime; // 我方子弹飞行 tick 数 = v + dt
+        double a = sx * sx + sy * sy - bulletSpeed * bulletSpeed;
+        double b = 2 * (ox * sx + oy * sy) - 2 * bulletSpeed * bulletSpeed * dt;
+        double c = ox * ox + oy * oy - bulletSpeed * bulletSpeed * dt * dt;
+        double vMin = fireTime + 1 - w.fireTime; // 我方子弹至少飞满 1 tick
+        double v = Double.POSITIVE_INFINITY;
+        if (Math.abs(a) < 1e-9) {
+            if (Math.abs(b) > 1e-9 && -c / b >= vMin) {
+                v = -c / b;
+            }
+        } else {
+            double disc = b * b - 4 * a * c;
+            if (disc >= 0) {
+                double s = Math.sqrt(disc);
+                double v1 = (-b - s) / (2 * a);
+                double v2 = (-b + s) / (2 * a);
+                if (v1 >= vMin) {
+                    v = v1;
+                }
+                if (v2 >= vMin && v2 < v) {
+                    v = v2;
+                }
+            }
+        }
+        if (v < 200) { // 有解且在合理时程内
+            Point2D.Double p = new Point2D.Double(
+                    w.origin.x + sx * v, w.origin.y + sy * v);
+            out.add(RcMath.absoluteBearing(gunPos, p));
+        }
+    }
+
+    static void noteActiveShadowShot() {
+        activeShadowShots++;
     }
 
     /** 无波可冲（对手还没开火）：绕敌环绕并保持距离，偶尔换向。 */
