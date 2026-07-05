@@ -1,0 +1,19 @@
+# 构建产物
+out/
+*.class
+*.jar
+
+# 外部参考代码（各有各的许可，不入库）
+reference/
+
+# 生成的临时对战文件
+battles/current.battle
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 系统文件
+Thumbs.db
+Desktop.ini
