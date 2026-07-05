@@ -49,6 +49,11 @@ final class KnnGun {
     private static int realWaves;
     private static int asFired; // 用 AS 枪开的真实炮数（诊断）
 
+    // 实弹命中率（能量管理用）。用整场累计而非滚动窗口：滚动窗口对冲浪对手会在
+    // 连中片段里冲过阈值、误触发重弹（弹速慢 → 逃逸角大 → 更好躲），来回震荡两头亏
+    private static int myShots;
+    private static int myHits;
+
     private final AdvancedRobot robot;
     private final Rectangle2D.Double field;
     private final List<GunWave> waves = new ArrayList<GunWave>();
@@ -80,11 +85,20 @@ final class KnnGun {
         return MAIN_DATA.size();
     }
 
-    /** 健康指标：两枪命中率与 AS 枪实际使用占比。 */
+    /** 健康指标：两枪虚拟命中率、AS 枪使用量、实弹命中率。 */
     static String gunStats() {
         double n = Math.max(1e-9, scoreNorm);
-        return String.format("gunMain=%.3f gunAS=%.3f realWaves=%d asFired=%d",
-                mainScore / n, asScore / n, realWaves, asFired);
+        return String.format("gunMain=%.3f gunAS=%.3f realWaves=%d asFired=%d hitRate=%.3f myShots=%d",
+                mainScore / n, asScore / n, realWaves, asFired, myHitRate(), myShots);
+    }
+
+    /** Wavelet.onBulletHit 转发：我的子弹命中敌人。 */
+    static void onMyBulletHit() {
+        myHits++;
+    }
+
+    private static double myHitRate() {
+        return myShots == 0 ? 0 : myHits / (double) myShots;
     }
 
     private static boolean useAsGun() {
@@ -115,7 +129,8 @@ final class KnnGun {
 
         breakWaves(enemyLocation, time);
 
-        double power = choosePower(robot.getEnergy(), enemyEnergy, distance);
+        double power = choosePower(robot.getEnergy(), enemyEnergy, distance,
+                myHitRate(), myShots);
         double bulletSpeed = RcMath.bulletSpeed(power);
         double mea = RcMath.maxEscapeAngle(bulletSpeed);
         double bft = distance / bulletSpeed;
@@ -155,6 +170,7 @@ final class KnnGun {
             Bullet b = robot.setFireBullet(power);
             if (b != null) {
                 w.real = true;
+                myShots++;
                 if (useAs) {
                     asFired++;
                 }
@@ -243,18 +259,39 @@ final class KnnGun {
     }
 
     /**
-     * 火力选择（阶段 0 规则版）：基础 1.95，近距离 2.95，
-     * 低能量收缩，并按敌方剩余能量做击杀经济（4*power 伤害恰好击杀即可）。
+     * 火力选择（阶段 1.4 规则版，参考 DrussGT 的基础 1.95 逻辑）：
+     * - 基础 1.95；
+     * - 打得准才打重：整场命中率 ≥50% → 2.95、≥33% → 2.45。阈值必须高：命中率 >1/3
+     *   开火才是能量正回报（3p 返还 > p 成本），且重弹更慢 → 对手逃逸角更大更好躲——
+     *   实测阈值 0.25 / 滚动窗口都会被冲浪对手误触发，全线回退；
+     * - 近距离压制：<140 → 2.95（这个距离基本必中）；
+     * - 能量差缩放：中远距离落后越多越省（每落后 1 点降 0.02，下限 1.2），拖长回合等对手先垮，
+     *   但只在 deficit>10 且非贴身时生效——别过度保守；
+     * - 击杀经济：正好打死即可（p≤1 伤 4p；p>1 伤 6p−2，反解）；
+     * - 低能量护栏：<20 能量按 1/10 收缩，防自我 disable。
      */
-    static double choosePower(double myEnergy, double enemyEnergy, double distance) {
+    static double choosePower(double myEnergy, double enemyEnergy, double distance,
+                              double hitRate, int shots) {
         double power = 1.95;
+        if (shots >= 20) {
+            if (hitRate >= 0.5) {
+                power = 2.95;
+            } else if (hitRate >= 0.33) {
+                power = 2.45;
+            }
+        }
         if (distance < 140) {
             power = 2.95;
         }
-        if (myEnergy < 20) {
-            power = Math.min(power, myEnergy / 10);
+        double deficit = enemyEnergy - myEnergy;
+        if (deficit > 10 && distance > 300) {
+            power = Math.min(power, Math.max(1.2, 1.95 - 0.02 * (deficit - 10)));
         }
-        power = Math.min(power, Math.max(0.1, enemyEnergy / 4));
+        if (myEnergy < 20) {
+            power = Math.min(power, Math.max(0.1, myEnergy / 10));
+        }
+        double killPower = enemyEnergy > 4 ? (enemyEnergy + 2) / 6 : enemyEnergy / 4;
+        power = Math.min(power, killPower);
         return RcMath.limit(0.1, Math.min(power, myEnergy - 0.1), 3.0);
     }
 }

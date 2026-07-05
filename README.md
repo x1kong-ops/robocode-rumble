@@ -67,7 +67,11 @@ GUI 观战：打开 Robocode，新建对战选 `rcr.Wavelet dev`（开 Paint 可
   - **虚拟枪框架**：每个真实开火波记下两把枪当时的预测 GF，波到达时按核距离记衰减软分（比二值命中 EMA 稳）；通用枪为默认，AS 枪须领先 0.05 且 ≥50 个开火波才接管——分差在噪声带内时换枪只会两头吃亏（margin 0.01 版实测反而更差）；
   - 3 场 100 回合平均：vs BasicGFSurfer **74%**（1.2 基线 70%）；vs Komarious 58%（59%，噪声内持平，AS 枪对它很少接管）；50 回合 testbed 平均 **83.9%**，Cigaret 54%→**64%**；
   - 健康自检：0 skipped turns（每 tick 双库查询无压力）；对非冲浪对手（DuelistMini / RamFire）`asFired=0`——AS 枪从不无谓接管。诊断量 `gunMain/gunAS/asFired` 已写入 `stats.txt`。
-- **阶段 1（第 3–8 周，目标前 20 / ~87–88 APS）**：~~precise prediction + precise intersection~~ → ~~距离控制 + wall smoothing~~ → ~~KNN 双枪（通用 + anti-surfer）~~ → 能量管理（基础 power ~1.95 规则）→ 被动 bullet shadows + gunheat waves。
+- **阶段 1.4 能量管理（规则版）——已完成（2026-07-05）**：
+  - 规则：基础 1.95；**打得准才打重**（整场命中率 ≥50% → 2.95、≥33% → 2.45；命中率 >1/3 开火才是能量正回报）；近距 <140 → 2.95；**能量差缩放**（中远距落后 >10 时每点降 0.02、下限 1.2，拖长回合等对手先垮）；击杀经济精确反解（p≤1 伤 4p / p>1 伤 6p−2）；<20 能量按 1/10 收缩防 disable；
+  - 试过并**放弃**：滚动窗口命中率（连中片段冲过阈值误触发重弹，重弹更慢逃逸角更大，vs BasicGFSurfer 跌 7%）；阈值 0.25（同因误触发）；<300 无条件 2.45；击杀 +4 伤害余量（更差，精确反解本身够用）；
+  - 实测（3×100 平均）：vs BasicGFSurfer ~70%、vs Komarious ~57-59%，与 1.3 在噪声带内持平——本阶段收益主要在弱走位对手的终结速度（Tracker 命中率 0.80 → 全程 2.95 重弹）与劣势局的能量续航；`hitRate/myShots` 已入 `stats.txt`。
+- **阶段 1（第 3–8 周，目标前 20 / ~87–88 APS）**：~~precise prediction + precise intersection~~ → ~~距离控制 + wall smoothing~~ → ~~KNN 双枪（通用 + anti-surfer）~~ → ~~能量管理（基础 power ~1.95 规则）~~ → 被动 bullet shadows + gunheat waves。
 - **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）→ 期望得分最大化能量管理 → 主动子弹阴影（active bullet shadowing）→ flattener（约 9% 命中率门控）。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。

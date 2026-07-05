@@ -108,6 +108,7 @@ public class Wavelet extends AdvancedRobot {
     @Override
     public void onBulletHit(BulletHitEvent e) {
         enemyEnergy -= Rules.getBulletDamage(e.getBullet().getPower());
+        KnnGun.onMyBulletHit();
     }
 
     @Override
