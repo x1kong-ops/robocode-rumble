@@ -5,7 +5,8 @@ param(
     [int]$Rounds = 35,
     [string]$Bot = "rcr.Wavelet dev",
     [string]$RobocodeHome = $(if ($env:ROBOCODE_HOME) { $env:ROBOCODE_HOME } else { "C:\robocode" }),
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [string[]]$ExtraJvmArgs = @()   # 例: -ExtraJvmArgs "-DNOSECURITY=true","-Drcr.datalog=..."
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +53,7 @@ try {
         "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED" `
         "--add-opens=java.desktop/javax.swing.text=ALL-UNNAMED" `
         "--add-opens=java.desktop/sun.awt=ALL-UNNAMED" `
+        @ExtraJvmArgs `
         robocode.Robocode -battle $battleFile -nodisplay -nosound -results $results
 } finally {
     Pop-Location

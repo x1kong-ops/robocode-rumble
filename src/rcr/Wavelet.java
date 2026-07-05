@@ -159,6 +159,7 @@ public class Wavelet extends AdvancedRobot {
         } catch (Exception ignored) {
             // 统计写不出去不影响对战
         }
+        KnnGun.closeDataLog();
     }
 
     @Override

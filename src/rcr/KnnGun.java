@@ -23,8 +23,10 @@ import robocode.util.Utils;
  */
 final class KnnGun {
 
-    // 特征权重：{子弹飞行时间, |横向速度|, 接近速度, 加速度, 方向未变时长, 前墙空间, 后墙空间}
-    private static final double[] WEIGHTS = {2, 4, 1, 2, 2, 2.5, 1};
+    // 特征权重：{子弹飞行时间, |横向速度|, 接近速度, 加速度, 方向未变时长, 前墙空间, 后墙空间, 近8tick位移}
+    // 阶段 2.1：离线梯度下降学得（ml/train_gun_weights.py，soft-KNN NLL），
+    // 留出集硬 KNN 车身窗口命中率 0.322 -> 0.341（手工权重基线 {2,4,1,2,2,2.5,1,2}）
+    private static final double[] WEIGHTS = {5.001, 0.832, 2.843, 0.457, 1.532, 1.692, 0.824, 0.606};
     private static final int DIMS = WEIGHTS.length;
 
     // 通用枪
@@ -63,6 +65,11 @@ final class KnnGun {
     private boolean hasPrev;
     private int enemyLateralDirection = 1;
     private long lastDirChangeTime;
+    private final List<Point2D.Double> enemyHistory = new ArrayList<Point2D.Double>();
+
+    // 离线训练数据导出：-Drcr.datalog=<csv 路径> 时启用（需 -DNOSECURITY=true，仅 datagen 用）
+    private static java.io.PrintWriter dataLog;
+    private static boolean dataLogInit;
 
     private static final class GunWave {
         Point2D.Double origin;
@@ -137,6 +144,10 @@ final class KnnGun {
         double mea = RcMath.maxEscapeAngle(bulletSpeed);
         double bft = distance / bulletSpeed;
 
+        enemyHistory.add(enemyLocation);
+        double disp8 = enemyLocation.distance(
+                enemyHistory.get(Math.max(0, enemyHistory.size() - 9))) / 64.0;
+
         double[] f = new double[DIMS];
         f[0] = RcMath.limit(0, bft / 80, 1);
         f[1] = Math.abs(lateralVelocity) / 8;
@@ -145,6 +156,7 @@ final class KnnGun {
         f[4] = RcMath.limit(0, (time - lastDirChangeTime) / (2 * bft), 1);
         f[5] = orbitalWallSpace(myLocation, absBearing, distance, mea, enemyLateralDirection);
         f[6] = orbitalWallSpace(myLocation, absBearing, distance, mea, -enemyLateralDirection);
+        f[7] = Math.min(1, disp8);
 
         GunWave w = new GunWave();
         w.origin = myLocation;
@@ -195,12 +207,13 @@ final class KnnGun {
                 double offset = Utils.normalRelativeAngle(
                         RcMath.absoluteBearing(w.origin, enemyLocation) - w.baseAngle);
                 double gf = RcMath.limit(-1, offset / mea * w.direction, 1);
+                double gfWidth = Math.atan(18 / dist) / mea; // 车身对应的 GF 半宽
 
                 MAIN_DATA.add(w.features, gf, 1);
                 AS_DATA.add(w.features, gf, w.real ? 1 : AS_VIRTUAL_WEIGHT);
+                logWave(w.features, gf, gfWidth, w.real);
 
                 if (w.real) {
-                    double gfWidth = Math.atan(18 / dist) / mea; // 车身对应的 GF 半宽
                     double zm = (w.gfMain - gf) / gfWidth;
                     double za = (w.gfAs - gf) / gfWidth;
                     mainScore = mainScore * SCORE_DECAY + Math.exp(-0.5 * zm * zm);
@@ -247,6 +260,39 @@ final class KnnGun {
             }
         }
         return bestGf;
+    }
+
+    /** 离线训练数据：features..., gf, gf半宽, 是否实弹。无 -Drcr.datalog 或无权限时静默关闭。 */
+    private static void logWave(double[] f, double gf, double width, boolean real) {
+        if (!dataLogInit) {
+            dataLogInit = true;
+            String path = System.getProperty("rcr.datalog");
+            if (path != null) {
+                try {
+                    dataLog = new java.io.PrintWriter(new java.io.BufferedWriter(
+                            new java.io.FileWriter(path, true)));
+                } catch (Exception denied) {
+                    dataLog = null; // 正常参战模式下沙箱会拒绝，安静降级
+                }
+            }
+        }
+        if (dataLog == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder(110);
+        for (double v : f) {
+            sb.append(String.format(java.util.Locale.US, "%.4f", v)).append(',');
+        }
+        sb.append(String.format(java.util.Locale.US, "%.4f,%.4f,", gf, width));
+        sb.append(real ? 1 : 0);
+        dataLog.println(sb);
+    }
+
+    /** battle 结束时冲刷数据文件（Wavelet.onBattleEnded 调用）。 */
+    static void closeDataLog() {
+        if (dataLog != null) {
+            dataLog.flush();
+        }
     }
 
     /** 敌人沿 direction 绕我环绕、离场前可走的轨道角度，按 1.5*MEA 归一化到 [0,1]。 */

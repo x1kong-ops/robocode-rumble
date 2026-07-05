@@ -17,8 +17,11 @@ src/rcr/Snapshot.java                双方状态快照（敌波回溯用）
 src/rcr/GeomTest.java                精确交点的暴力采样自检（java -cp out\classes;robocode.jar rcr.GeomTest）
 src/rcr/ShadowTest.java              bullet shadow 几何的暴力采样自检（同上，rcr.ShadowTest）
 scripts/build.ps1                    编译脚本（输出到 out/classes，保持 Java 8 兼容）
-scripts/run-battle.ps1               打包部署 + 无头对战 + 输出战果
+scripts/run-battle.ps1               打包部署 + 无头对战 + 输出战果（-ExtraJvmArgs 可传附加 JVM 参数）
 scripts/testbed.ps1                  8 对手基准测试组一键跑分
+scripts/datagen.ps1                  批量采集枪波训练数据到 ml/data/*.csv（11 对手 × N 场）
+ml/train_gun_weights.py              PyTorch 训练 KNN 嵌入权重（可微 soft-KNN + NLL，硬 KNN 验证）
+ml/eval_per_enemy.py                 学得权重按对手分解验证
 reference/                           Diamond / BeepBoop / Saguaro 开源代码（gitignore，仅学习参考）
 ```
 
@@ -46,6 +49,17 @@ GUI 观战：打开 Robocode，新建对战选 `rcr.Wavelet dev`（开 Paint 可
 对战结束后 `C:\robocode\robots\.data\rcr\Wavelet.data\stats.txt` 会记录跳过回合数与 KNN 数据量。
 
 批量测试（调参必备）后续接入 RoboResearch 或 RoboRunner，搭覆盖不同强度对手的 test bed。
+
+### 离线训练（阶段 2.1+）
+
+```powershell
+.\scripts\datagen.ps1 -Battles 2 -Rounds 35    # 采数据：11 对手，写 ml/data/gun-*.csv（~25 万波，几分钟）
+python ml\train_gun_weights.py                 # 训练嵌入权重 + 留出集硬 KNN 验证，末尾输出 Java 常量
+python ml\eval_per_enemy.py                    # 按对手分解对比手工/学得权重
+```
+
+数据导出走 `-Drcr.datalog=<csv>` + `-DNOSECURITY=true`（仅本地 datagen；正常对战沙箱拒绝文件写、自动降级关闭）。
+需要 Python 3.11 + `pip install torch --index-url https://download.pytorch.org/whl/cpu` + numpy。
 
 ## 路线图(详见报告 Recommendations 一节)
 
@@ -79,7 +93,14 @@ GUI 观战：打开 Robocode，新建对战选 `rcr.Wavelet dev`（开 Paint 可
   - 试过并**放弃**：KDE 近邻按特征距离加权 1/(1+√d)（testbed 掉 1%，回退）；
   - **达标验证**：3 轮 50 回合 testbed 平均 **85.3% / 86.6% / 87.8%**（目标 85+ ✓）；3×100 平均：BasicGFSurfer **83%**、Komarious **66%**、Cigaret **61%**（无 problem bot <60% ✓，Cigaret 贴线待攻坚）；0 skipped turns，`shadowPieces/gunheatWaves` 计数已入 `stats.txt`。
 - **阶段 1（第 3–8 周，目标前 20 / ~87–88 APS）——全部完成**：~~precise prediction + precise intersection~~ → ~~距离控制 + wall smoothing~~ → ~~KNN 双枪（通用 + anti-surfer）~~ → ~~能量管理（基础 power ~1.95 规则）~~ → ~~被动 bullet shadows + gunheat waves~~。
-- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）→ 期望得分最大化能量管理 → 主动子弹阴影（active bullet shadowing）→ flattener（约 9% 命中率门控）。
+- **阶段 2.1 离线梯度下降学 KNN 嵌入权重（枪）——已完成（2026-07-05）**：
+  - **数据管道**：`KnnGun` 在 `-Drcr.datalog=<csv>`（配 `-DNOSECURITY=true`）时把每个到达的枪波写盘（8 特征, gf, 车身 GF 半宽, 是否实弹）；`datagen.ps1` 对 11 个走位风格各异的对手（追身/直线/随机/环绕/冲浪/躲避）× 2 场 × 35 回合批量采集，共 **245,664** 波；
+  - **新特征**：近 8 tick 位移 `disp8`（BeepBoop 特征集常客），DIMS 7→8；
+  - **训练**（`ml/train_gun_weights.py`，PyTorch CPU 约 1 分钟）：可微 soft-KNN——距离 `‖w⊙(fᵢ−fⱼ)‖²` 取 softmax 注意力，对候选 GF 按「落进 query 车身窗口」的高斯核算命中概率，损失 = −log P；候选只取同场更早的波（模拟运行时只见过过去），实弹 query 3× 权重，`softplus` 保证 w>0，从手工权重出发 Adam 3000 步；
+  - **离线验证**（留出场，与运行时一致的硬 KNN top-50 + KDE 峰值，车身窗口命中率）：整体 **0.322 → 0.341（+5.7%）**；11 个对手 8 升 3 微降（SpinBot +0.133、BasicGFSurfer +0.030、Komarious +0.028；微降的是本就 0.8+ 的 Tracker/RamFire 和 Walls）。学到的口径：bft 和接近速度权重大幅上调，|横向速度|/加速度大幅下调；
+  - **实战验证**：3×100 平均 vs BasicGFSurfer **87%**（1.5 基线 83%）、Komarious **66.7%**（66%）、Cigaret **62.7%**（61%）、DuelistMini 83%（84%，噪声内）；50 回合 testbed **86.8%**（85.3–87.8 带内）。冲浪/躲避系全线不掉、标杆对手 +4，改进立住；
+  - **走位权重**：当前走位统计是 3×3 分段 bin 而非 KNN，没有嵌入可学——留到把走位统计升级成 KNN 型（或 flattener）时一并学，与「瞄准优先，其次走位」的优先级一致。
+- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）~~ → 期望得分最大化能量管理 → 主动子弹阴影（active bullet shadowing）→ flattener（约 9% 命中率门控）→ 走位统计 KNN 化 + 嵌入权重学习。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
 

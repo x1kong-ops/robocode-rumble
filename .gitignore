@@ -9,6 +9,9 @@ reference/
 # 生成的临时对战文件
 battles/current.battle
 
+# 离线训练数据（datagen.ps1 随时可重新生成）
+ml/data/
+
 # IDE
 .idea/
 *.iml
