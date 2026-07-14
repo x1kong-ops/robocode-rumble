@@ -140,10 +140,27 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
 
 ## 参赛（RoboRumble）备忘
 
-- 包名全局唯一且不含下划线——当前占位包名为 `rcr`，正式参赛前改成自己的标识。
-- 客户端固定 robocode 1.9.4.2。
-- 打包：Robocode 客户端 **Robot → Package robot for upload**。
-- 在 RoboWiki 的 RoboRumble/Participants 页面加一行 `botname,jar_url`。
+### 本机已就绪
+
+- **评分客户端 1.9.4.2**：已解压到 `C:\robocode-1.9.4.2`（开发仍可用 `C:\robocode` 1.10.3）。
+- **打包脚本**：`.\scripts\package-upload.ps1 -Version 1.0 -RobocodeHome C:\robocode-1.9.4.2` → 产出 `dist\<classname>_1.0.jar`。
+- **改包名脚本**：`.\scripts\rename-package.ps1 -NewPackage <你的唯一包.类名>`（例 `pc.Wavelet`；**不能有下划线**，须全局唯一）。
+- 1.9.4.2 冒烟已通过（vs sample.Tracker 10 回合）；强对手 JAR 已同步进该安装的 `robots/`。
+
+### 你还需要完成的人工步骤
+
+1. **选定包名**并运行 `rename-package.ps1`（当前占位仍是 `rcr.Wavelet`）。
+2. 在 1.9.4.2 上回归：  
+   `.\scripts\testbed.ps1 -RobocodeHome C:\robocode-1.9.4.2 -Rounds 50`  
+   （可选）`.\scripts\hardbed.ps1 -Tier top -RobocodeHome C:\robocode-1.9.4.2`
+3. `.\scripts\package-upload.ps1 -Version 1.0 -Package <新classname> -RobocodeHome C:\robocode-1.9.4.2`
+4. **托管 JAR**（必须直链）：GitHub Release / Dropbox（链接加 `?dl=1`）/ Google Drive 直链。
+5. 编辑 [RoboRumble/Participants](https://robowiki.net/wiki/RoboRumble/Participants)，按字母序加一行：  
+   `你的classname 版本,https://直链.jar`  
+   （逗号后**无空格**；若升版本先删旧行）。
+6. （可选）自己跑 rumble 客户端：编辑 `C:\robocode-1.9.4.2\roborumble\roborumble.txt` 里的用户名，再运行 `roborumble.bat`。
+
+规则摘要：须有 package、JAR、同目录 `.properties`；命名与内部结构一致；Java 8–17 字节码均可（本项目 `--release 8`）。
 
 ## 关键参考
 

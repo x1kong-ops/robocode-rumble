@@ -1,7 +1,9 @@
 # 构建产物
 out/
+dist/
 *.class
 *.jar
+!scripts/**/*.jar
 
 # 外部参考代码（各有各的许可，不入库）
 reference/
