@@ -81,9 +81,17 @@ final class PowerSelector {
             return Math.min(1, p + z * Math.sqrt(p * (1 - p) / Math.max(1, shotsPassed)));
         }
 
-        /** 未折算原始命中率（主动阴影权重用），下限 0.001。 */
+        /** 未折算原始命中率（主动阴影 / flattener 门控用），下限 0.001。 */
         double rawHitRate() {
             return Math.max(0.001, hits / Math.max(1.0, shotsPassed));
+        }
+
+        int shotsPassed() {
+            return shotsPassed;
+        }
+
+        int hits() {
+            return hits;
         }
 
         private void roundEnd(boolean won) {

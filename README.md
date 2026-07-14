@@ -8,7 +8,7 @@
 
 ```
 docs/roborumble-research-report.md   深度研究报告（榜单快照、顶级机器人剖析、算法谱系、路线图）
-src/rcr/Wavelet.java                 主力机器人：事件路由 / 雷达锁 / 能量簿记 / 健康指标
+src/rcr/Wavelet.java                 主力机器人：事件路由 / 雷达锁 / 能量簿记 / 健康指标（rcr.Wavelet dev）
 src/rcr/Surfing.java                 True Surfing 走位（两波链式精确预测 + 精确交点 + GF 统计）
 src/rcr/KnnGun.java                  KNN(DC) 双枪（通用 + anti-surfer，虚拟枪框架选枪）
 src/rcr/PowerSelector.java           火力选择：期望得分最大化（BeepBoop 模型移植）
@@ -115,7 +115,13 @@ python ml\eval_per_enemy.py                    # 按对手分解对比手工/学
   - 试过并**放弃**：β 前置系数 2（BeepBoop 原值，我们的 danger 口径含 ε 底数，对比度比它的 bin 危险大，系数 2 过度让利命中率）；炮管本 tick 可达候选 ×1.1（BeepBoop 有，我们实测 BasicGFSurfer −2 回退）；
   - **实测（v4 定稿，6×100 平均）**：BasicGFSurfer 86.3% → **87.0%**（含单场 90 峰值；主动阴影收益本就集中在强 surfer）；Komarious 67.0%、Cigaret 61.0%、DuelistMini 82.7%（均在方差带内）；sample 系 99-100%；**0 skipped turns**（每 tick 12 次精确预测 + 临开火 ≤10 次假想阴影重算，CPU 仍有余量）；`activeShadowShots`（改角次数，Komarious 300 回合 ≈800 次 ≈8% 射击）已入 `stats.txt`；
   - 注：本地 testbed 对 rumble 全场分布低估此项——榜上 surfer 密度远高于我们 8 bot 组，Kev 点名该创新「对强 surfer 收益最大」。
-- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）~~ → ~~期望得分最大化能量管理~~ → ~~主动子弹阴影（active bullet shadowing）~~ → flattener（约 9% 命中率门控）→ 走位统计 KNN 化 + 嵌入权重学习。
+- **阶段 2.4 Flattener（滚动命中率门控）——已完成（2026-07-13）**：
+  - **机制**：敌枪**滚动**命中率（最近 40 发）>12% 时开启（<9% 关闭，滞回；窗口满 30 发才判），把飞过的敌波按我当前位置记为伪命中，抬高「我刚走过的 GF」危险，压平躲避轮廓，让 pattern-matching / 学走位的 GF 枪失效；
+  - **弱权重伪命中**：`stats[x] += 0.15 / ((x−i)²+1)`，**不**做 0.75 衰减——全权重伪命中会冲掉真实命中尖峰，冲浪变噪声，敌命中率升高后 flattener 锁死开启（死亡螺旋：BasicGFSurfer 87%→78%）；
+  - **滚动 vs 累计**：累计命中率门控会在开局连中后永久偏高，同样锁死；滚动窗口能在躲开后及时关掉；
+  - 试过并**放弃**：经典 DrussGT 式「整场 HR>9% + 全权重 logHit」（上述死亡螺旋）；
+  - **实测（3×100 平均）**：Cigaret 61% → **64.0%**（pattern matcher，目标收益）；Komarious 67% → **71.7%**；BasicGFSurfer 85.7%（87%，噪声内）；DuelistMini 83.7%（持平）；50 回合 testbed **86.9%**；0 skipped turns；`flattenVisits/flattener/enemyHRroll` 已入 `stats.txt`。
+- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重（PyTorch 训练、导出常数进 Java）~~ → ~~期望得分最大化能量管理~~ → ~~主动子弹阴影（active bullet shadowing）~~ → ~~flattener（命中率门控）~~ → 走位统计 KNN 化 + 嵌入权重学习。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
 

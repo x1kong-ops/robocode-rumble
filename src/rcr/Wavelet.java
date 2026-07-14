@@ -22,11 +22,11 @@ import robocode.WinEvent;
 import robocode.util.Utils;
 
 /**
- * Wavelet —— 阶段 0 主力：True Surfing 走位 + KNN(DC) 单枪。
- * 架构参考 RoboWiki Wave Surfing Tutorial（BasicGFSurfer）与 Diamond。
- *
- * 能量簿记依赖 Robocode 事件优先级：BulletHit(50)/HitByBullet(20)/HitRobot(20)
- * 都先于 ScannedRobot(10) 处理，所以扫描时的能量差就是对方的开火功率。
+ * Wavelet —— 1v1 主力机器人（rcr.Wavelet dev）。
+ * True Surfing（两波精确预测 + 被动/主动 bullet shadows + gunheat waves + flattener）
+ * + KNN(DC) 双枪（离线学得嵌入权重 + 主动阴影改角）
+ * + 期望得分最大化火力（BeepBoop 模型）。
+ * 架构参考 Diamond / BeepBoop；健康指标写入 stats.txt。
  */
 public class Wavelet extends AdvancedRobot {
 
@@ -83,7 +83,7 @@ public class Wavelet extends AdvancedRobot {
         Snapshot cur = new Snapshot(getTime(), myLocation, enemyLocation,
                 myLateralDirection, absBearingEnemyToMe, Math.abs(myLateralVelocity));
 
-        // 开火检测：能量下降 (0.09, 3.01) 视为开火，功率即能量差
+        // 开火检测：能量下降 (0.09, 3.01) 视为开火（事件优先级保证扫描前已处理 HitByBullet 等）
         double drop = enemyEnergy - e.getEnergy();
         double firedPower = drop > 0.09 && drop < 3.01 ? drop : -1;
         enemyEnergy = e.getEnergy();

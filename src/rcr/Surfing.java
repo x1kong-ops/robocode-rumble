@@ -69,6 +69,22 @@ final class Surfing {
     private static int shadowPieces;  // 诊断：本场生成的阴影片段数
     private static int gunheatWaves;  // 诊断：本场生成的 gunheat 虚波数
 
+    // Flattener（阶段 2.4，DrussGT 路线）：敌枪近期命中率高时把飞过的波也轻轻记成「命中」，
+    // 压平躲避轮廓，让 pattern-matching / 学我们走位的 GF 枪失效。
+    // 用滚动窗口门控（非整场累计）——累计门控会在早期连中后锁死开启，伪命中冲掉
+    // 真实命中峰 → 更易挨打 → 死亡螺旋（实测 BasicGFSurfer 87→78）。
+    // 伪命中弱权重、不衰减，避免冲掉 logHit 的尖峰。
+    private static final double FLATTENER_ON = 0.12;
+    private static final double FLATTENER_OFF = 0.09;
+    private static final int FLATTENER_WINDOW = 40;
+    private static final int FLATTENER_MIN_SHOTS = 30;
+    private static final boolean[] FLAT_HITS = new boolean[FLATTENER_WINDOW];
+    private static int flatHead;
+    private static int flatCount;
+    private static int flatHitCount;
+    private static boolean flattenerOn;
+    private static int flattenVisits;
+
     private final AdvancedRobot robot;
     private final Rectangle2D.Double field;
     private final double fieldW;
@@ -181,7 +197,13 @@ final class Surfing {
 
     static String surfStats() {
         return "shadowPieces=" + shadowPieces + " gunheatWaves=" + gunheatWaves
-                + " activeShadowShots=" + activeShadowShots;
+                + " activeShadowShots=" + activeShadowShots
+                + " flattenVisits=" + flattenVisits
+                + " flattener=" + (flattenerOn ? 1 : 0)
+                + " enemyHR=" + String.format(java.util.Locale.US, "%.3f",
+                PowerSelector.ENEMY.rawHitRate())
+                + " enemyHRroll=" + String.format(java.util.Locale.US, "%.3f",
+                rollingEnemyHitRate());
     }
 
     /** 敌人最近一次开火功率（未观测到开火时为默认 1.9），PowerSelector 建模用。 */
@@ -259,6 +281,11 @@ final class Surfing {
             if (w.distanceTraveled > w.origin.distance(cur.myLocation) + 50) {
                 if (!w.imaginary) {
                     PowerSelector.ENEMY.shotPassed(w.power, false); // 飞过 = 没打中我
+                    noteEnemyShotForFlattener(false);
+                    if (updateFlattenerGate()) {
+                        logFlattenVisit(w, cur.myLocation);
+                        flattenVisits++;
+                    }
                 }
                 it.remove();
             }
@@ -269,6 +296,46 @@ final class Surfing {
                 bt.remove();
             }
         }
+    }
+
+    /** 滚动窗口记一发敌弹结果，供 flattener 门控。 */
+    private static void noteEnemyShotForFlattener(boolean hit) {
+        if (flatCount == FLATTENER_WINDOW) {
+            if (FLAT_HITS[flatHead]) {
+                flatHitCount--;
+            }
+        } else {
+            flatCount++;
+        }
+        FLAT_HITS[flatHead] = hit;
+        if (hit) {
+            flatHitCount++;
+        }
+        flatHead = (flatHead + 1) % FLATTENER_WINDOW;
+    }
+
+    private static double rollingEnemyHitRate() {
+        return flatCount == 0 ? 0 : flatHitCount / (double) flatCount;
+    }
+
+    /**
+     * 按敌枪滚动命中率更新 flattener 开关（滞回）。窗口未满时强制关闭。
+     * @return 当前是否应把飞过的波记为伪命中
+     */
+    private static boolean updateFlattenerGate() {
+        if (flatCount < FLATTENER_MIN_SHOTS) {
+            flattenerOn = false;
+            return false;
+        }
+        double hr = rollingEnemyHitRate();
+        if (flattenerOn) {
+            if (hr < FLATTENER_OFF) {
+                flattenerOn = false;
+            }
+        } else if (hr > FLATTENER_ON) {
+            flattenerOn = true;
+        }
+        return flattenerOn;
     }
 
     private EnemyWave closestSurfableWave(Point2D.Double pos, long time) {
@@ -307,6 +374,17 @@ final class Surfing {
         }
     }
 
+    /**
+     * Flattener 伪命中：弱权重抬高「我刚走过的 GF」，不衰减真实命中峰。
+     * 全权重 + 0.75 衰减实测会把尖峰冲平，冲浪决策变噪声，敌命中率反而升高。
+     */
+    private static void logFlattenVisit(EnemyWave w, Point2D.Double location) {
+        int index = factorIndex(w, location);
+        for (int x = 0; x < BINS; x++) {
+            w.stats[x] += 0.15 / ((x - index) * (x - index) + 1);
+        }
+    }
+
     /** 被子弹命中 / 子弹对撞时调用：找到对应敌波，记录命中 GF 并移除。 */
     void onBulletContact(Point2D.Double hitLocation, double bulletVelocity,
                          double bulletPower, boolean hitMe, long time) {
@@ -324,6 +402,10 @@ final class Surfing {
             }
         }
         PowerSelector.ENEMY.shotPassed(match != null ? match.power : bulletPower, hitMe);
+        // 对撞不算打中我，也不进 flattener 滚动窗口（那是枪瞄偏/阴影，不是走位可学信号）
+        if (hitMe) {
+            noteEnemyShotForFlattener(true);
+        }
         if (match != null) {
             logHit(match, hitLocation);
             waves.remove(match);
