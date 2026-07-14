@@ -1,4 +1,4 @@
-package rcr;
+package pc;
 
 import java.awt.geom.Line2D;
 import java.awt.geom.Point2D;
@@ -16,7 +16,7 @@ import robocode.util.Utils;
  *   （双方本 tick 的位移线段是否相交，Line2D.linesIntersect）判断是否对撞。
  * 两者必须一致（区间边界附近留网格容差）。
  *
- * 运行：java -cp out\classes;robocode.jar rcr.ShadowTest
+ * 运行：java -cp out\classes;robocode.jar pc.ShadowTest
  */
 public final class ShadowTest {
 

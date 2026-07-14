@@ -4,7 +4,7 @@
 #   .\scripts\package-upload.ps1 -Version 1.0 -Package pc.Wavelet -RobocodeHome C:\robocode-1.9.4.2
 param(
     [string]$Version = "1.0",
-    [string]$Package = "rcr.Wavelet",
+    [string]$Package = "pc.Wavelet",
     [string]$RobocodeHome = $(if ($env:ROBOCODE_HOME) { $env:ROBOCODE_HOME } else { "C:\robocode-1.9.4.2" }),
     [switch]$SkipBuild
 )

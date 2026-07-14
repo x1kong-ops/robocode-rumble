@@ -1,4 +1,4 @@
-package rcr;
+package pc;
 
 import robocode.Rules;
 

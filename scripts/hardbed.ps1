@@ -1,4 +1,4 @@
-# 强对手验证组：本地有的顶级 / 次顶级 rumble bot。
+﻿# 强对手验证组：本地有的顶级 / 次顶级 rumble bot。
 # 用法:
 #   .\scripts\hardbed.ps1 [-Rounds 100] [-Runs 3] [-SkipBuild]
 #   .\scripts\hardbed.ps1 -Tier top          # 只跑前排 (BeepBoop/DrussGT/Diamond/...)
@@ -58,7 +58,7 @@ foreach ($enemy in $enemies) {
         $out = powershell -ExecutionPolicy Bypass -File $runBattle `
             -Enemy $enemy -Rounds $Rounds -RobocodeHome $RobocodeHome -SkipBuild 2>$null | Out-String
         $pct = -1
-        if ($out -match 'rcr\.Wavelet[^\r\n]*?\((\d+)%\)') { $pct = [int]$Matches[1] }
+        if ($out -match 'pc\.Wavelet[^\r\n]*?\((\d+)%\)') { $pct = [int]$Matches[1] }
         if ($pct -ge 0) { $scores += $pct }
         Write-Host ("  [{0}/{1}] {2,-36} {3,3}%" -f $i, $Runs, $enemy, $pct)
     }

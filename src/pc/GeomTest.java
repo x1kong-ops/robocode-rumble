@@ -1,11 +1,11 @@
-package rcr;
+package pc;
 
 import java.awt.geom.Point2D;
 import java.util.Random;
 
 /**
  * 开发期自检（非机器人代码）：用暴力采样交叉验证精确交点例程。
- * 运行：java -cp out\classes rcr.GeomTest
+ * 运行：java -cp out\classes pc.GeomTest
  */
 public final class GeomTest {
 

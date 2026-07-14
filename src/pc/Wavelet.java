@@ -1,4 +1,4 @@
-package rcr;
+package pc;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
@@ -22,7 +22,7 @@ import robocode.WinEvent;
 import robocode.util.Utils;
 
 /**
- * Wavelet —— 1v1 主力机器人（rcr.Wavelet dev）。
+ * Wavelet —— 1v1 主力机器人（pc.Wavelet dev）。
  * True Surfing（两波精确预测 + KNN 危险密度/学得嵌入 + 被动/主动 shadows + flattener）
  * + KNN(DC) 双枪（学得嵌入 + 主动阴影改角）
  * + 期望得分最大化火力（BeepBoop 模型）。

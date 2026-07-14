@@ -30,4 +30,4 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "编译完成 -> $outDir"
-Write-Host "用 scripts\run-battle.ps1 可打包部署并跑无头对战（机器人名 rcr.Wavelet dev）"
+Write-Host "用 scripts\run-battle.ps1 可打包部署并跑无头对战（机器人名 pc.Wavelet dev）"

@@ -1,4 +1,4 @@
-package rcr;
+package pc;
 
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
@@ -390,7 +390,7 @@ final class KnnGun {
     private static void logWave(double[] f, double gf, double width, boolean real) {
         if (!dataLogInit) {
             dataLogInit = true;
-            String path = System.getProperty("rcr.datalog");
+            String path = System.getProperty("pc.datalog");
             if (path != null) {
                 try {
                     dataLog = new java.io.PrintWriter(new java.io.BufferedWriter(

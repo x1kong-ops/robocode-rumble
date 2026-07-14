@@ -1,9 +1,9 @@
-# Build, deploy loose classes into Robocode's robots dir, run a headless battle, print results.
+﻿# Build, deploy loose classes into Robocode's robots dir, run a headless battle, print results.
 # Usage: .\scripts\run-battle.ps1 -Enemy sample.Tracker [-Rounds 35] [-SkipBuild]
 param(
     [string]$Enemy = "sample.Tracker",
     [int]$Rounds = 35,
-    [string]$Bot = "rcr.Wavelet dev",
+    [string]$Bot = "pc.Wavelet dev",
     [string]$RobocodeHome = $(if ($env:ROBOCODE_HOME) { $env:ROBOCODE_HOME } else { "C:\robocode" }),
     [switch]$SkipBuild,
     [string[]]$ExtraJvmArgs = @()   # 例: -ExtraJvmArgs "-DNOSECURITY=true","-Drcr.datalog=..."
@@ -17,16 +17,16 @@ if (-not $SkipBuild) {
 }
 
 # Package as a jar (this Robocode install does not pick up loose classes in robots/)
-$props = Join-Path $root "out\classes\rcr\Wavelet.properties"
+$props = Join-Path $root "out\classes\pc\Wavelet.properties"
 @"
-robot.classname=rcr.Wavelet
+robot.classname=pc.Wavelet
 robot.version=dev
-robot.name=rcr.Wavelet
+robot.name=pc.Wavelet
 robot.description=KNN surfing + KNN dual gun + score-max power + active shadows + flattener
 robocode.version=1.10.3
 robot.java.source.included=false
 "@ | Set-Content -Path $props -Encoding ASCII
-jar cf (Join-Path $RobocodeHome "robots\rcr.Wavelet_dev.jar") -C (Join-Path $root "out\classes") rcr
+jar cf (Join-Path $RobocodeHome "robots\pc.Wavelet_dev.jar") -C (Join-Path $root "out\classes") pc
 if ($LASTEXITCODE -ne 0) { Write-Error "jar packaging failed" }
 
 # Generate battle file

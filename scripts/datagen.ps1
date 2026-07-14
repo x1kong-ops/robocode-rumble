@@ -45,11 +45,11 @@ foreach ($enemy in $enemies) {
         $surfCsv = Join-Path $dataDir "surf-$safe-$i.csv"
         if ($doGun) {
             if (Test-Path $gunCsv) { Remove-Item $gunCsv }
-            $jvm += "-Drcr.datalog=$gunCsv"
+            $jvm += "-Dpc.datalog=$gunCsv"
         }
         if ($doSurf) {
             if (Test-Path $surfCsv) { Remove-Item $surfCsv }
-            $jvm += "-Drcr.surfdata=$surfCsv"
+            $jvm += "-Dpc.surfdata=$surfCsv"
         }
         & (Join-Path $PSScriptRoot "run-battle.ps1") -Enemy $enemy -Rounds $Rounds -SkipBuild `
             -ExtraJvmArgs $jvm 2>$null | Out-Null

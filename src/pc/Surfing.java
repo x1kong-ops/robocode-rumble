@@ -1,4 +1,4 @@
-package rcr;
+package pc;
 
 import java.awt.Graphics2D;
 import java.awt.geom.Point2D;
@@ -484,7 +484,7 @@ final class Surfing {
     private static void logSurfWave(double[] f, double gf, double width, int realHit) {
         if (!surfLogInit) {
             surfLogInit = true;
-            String path = System.getProperty("rcr.surfdata");
+            String path = System.getProperty("pc.surfdata");
             if (path != null) {
                 try {
                     surfLog = new java.io.PrintWriter(new java.io.BufferedWriter(

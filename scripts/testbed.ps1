@@ -1,4 +1,4 @@
-# Run the benchmark test bed (a spread of targeting/movement styles) and print a summary.
+﻿# Run the benchmark test bed (a spread of targeting/movement styles) and print a summary.
 # Usage: .\scripts\testbed.ps1 [-Rounds 35] [-SkipBuild]
 param(
     [int]$Rounds = 35,
@@ -30,7 +30,7 @@ foreach ($enemy in $Enemies) {
     $out = powershell -ExecutionPolicy Bypass -File $runBattle `
         -Enemy $enemy -Rounds $Rounds -RobocodeHome $RobocodeHome -SkipBuild 2>$null | Out-String
     $pct = -1
-    if ($out -match 'rcr\.Wavelet[^\r\n]*?\((\d+)%\)') { $pct = [int]$Matches[1] }
+    if ($out -match 'pc\.Wavelet[^\r\n]*?\((\d+)%\)') { $pct = [int]$Matches[1] }
     $summary += [pscustomobject]@{ Enemy = $enemy; ScorePct = $pct }
     Write-Host ("{0,-38} {1,3}%" -f $enemy, $pct)
 }
