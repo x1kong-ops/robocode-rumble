@@ -152,10 +152,13 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
 1. ~~改包名~~ → **`pc.Wavelet`**（源码在 `src/pc/`）。
 2. ~~1.9.4.2 testbed~~ → 50 回合平均 **86.4%**（与 1.10.3 开发机一致）。
 3. ~~打包~~ → `dist/pc.Wavelet_1.0.jar`（也已部署到 `C:\robocode-1.9.4.2\robots\`）。
-4. **托管 JAR**（待做）：登录 GitHub 后建仓库 + Release 直链。
-5. **RoboWiki Participants**（待做）：加一行  
-   `pc.Wavelet 1.0,<直链>`（逗号后无空格）。
+4. ~~托管 JAR~~ → GitHub Release：  
+   https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.0/pc.Wavelet_1.0.jar
+5. **RoboWiki Participants**（待你编辑 wiki）：按字母序加一行（逗号后无空格）：  
+   `pc.Wavelet 1.0,https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.0/pc.Wavelet_1.0.jar`
 6. （可选）跑 rumble 客户端：编辑 `C:\robocode-1.9.4.2\roborumble\roborumble.txt` 用户名后运行 `roborumble.bat`。
+
+仓库：https://github.com/x1kong-ops/robocode-rumble · Release：https://github.com/x1kong-ops/robocode-rumble/releases/tag/v1.0
 
 规则摘要：须有 package、JAR、同目录 `.properties`；命名与内部结构一致；Java 8–17 字节码均可（本项目 `--release 8`）。
 
