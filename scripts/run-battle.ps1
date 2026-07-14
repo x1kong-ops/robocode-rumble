@@ -22,7 +22,7 @@ $props = Join-Path $root "out\classes\rcr\Wavelet.properties"
 robot.classname=rcr.Wavelet
 robot.version=dev
 robot.name=rcr.Wavelet
-robot.description=True surfing + KNN dual gun + score-max power + active shadows + flattener
+robot.description=KNN surfing + KNN dual gun + score-max power + active shadows + flattener
 robocode.version=1.10.3
 robot.java.source.included=false
 "@ | Set-Content -Path $props -Encoding ASCII

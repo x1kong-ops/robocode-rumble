@@ -23,8 +23,8 @@ import robocode.util.Utils;
 
 /**
  * Wavelet —— 1v1 主力机器人（rcr.Wavelet dev）。
- * True Surfing（两波精确预测 + 被动/主动 bullet shadows + gunheat waves + flattener）
- * + KNN(DC) 双枪（离线学得嵌入权重 + 主动阴影改角）
+ * True Surfing（两波精确预测 + KNN 危险密度/学得嵌入 + 被动/主动 shadows + flattener）
+ * + KNN(DC) 双枪（学得嵌入 + 主动阴影改角）
  * + 期望得分最大化火力（BeepBoop 模型）。
  * 架构参考 Diamond / BeepBoop；健康指标写入 stats.txt。
  */
@@ -77,11 +77,15 @@ public class Wavelet extends AdvancedRobot {
         double absBearingEnemyToMe = Utils.normalAbsoluteAngle(absBearingToEnemy + Math.PI);
         double myLateralVelocity =
                 getVelocity() * Math.sin(getHeadingRadians() - absBearingEnemyToMe);
+        // >0 = 朝敌人逼近（与枪侧 advancing 口径一致）
+        double myAdvancingVelocity =
+                -getVelocity() * Math.cos(getHeadingRadians() - absBearingEnemyToMe);
         if (Math.abs(myLateralVelocity) > 0.1) {
             myLateralDirection = myLateralVelocity > 0 ? 1 : -1;
         }
         Snapshot cur = new Snapshot(getTime(), myLocation, enemyLocation,
-                myLateralDirection, absBearingEnemyToMe, Math.abs(myLateralVelocity));
+                myLateralDirection, absBearingEnemyToMe,
+                myLateralVelocity, myAdvancingVelocity);
 
         // 开火检测：能量下降 (0.09, 3.01) 视为开火（事件优先级保证扫描前已处理 HitByBullet 等）
         double drop = enemyEnergy - e.getEnergy();
@@ -180,6 +184,7 @@ public class Wavelet extends AdvancedRobot {
             // 统计写不出去不影响对战
         }
         KnnGun.closeDataLog();
+        Surfing.closeDataLog();
     }
 
     @Override

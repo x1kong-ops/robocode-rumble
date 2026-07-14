@@ -11,16 +11,23 @@ final class Snapshot {
     final int myLateralDirection;
     /** 敌 → 我 的绝对方位角，即敌波的 GF0 基准角。 */
     final double absBearingEnemyToMe;
-    /** 我相对敌人的横向速度绝对值（冲浪统计分段用）。 */
+    /** 我相对敌人的横向速度绝对值（兼容旧分段逻辑 / 诊断）。 */
     final double myAbsLateralVelocity;
+    /** 有符号横向速度（相对敌→我方位）。 */
+    final double myLateralVelocity;
+    /** 有符号接近速度：>0 表示朝敌人逼近。 */
+    final double myAdvancingVelocity;
 
     Snapshot(long time, Point2D.Double myLocation, Point2D.Double enemyLocation,
-             int myLateralDirection, double absBearingEnemyToMe, double myAbsLateralVelocity) {
+             int myLateralDirection, double absBearingEnemyToMe,
+             double myLateralVelocity, double myAdvancingVelocity) {
         this.time = time;
         this.myLocation = myLocation;
         this.enemyLocation = enemyLocation;
         this.myLateralDirection = myLateralDirection;
         this.absBearingEnemyToMe = absBearingEnemyToMe;
-        this.myAbsLateralVelocity = myAbsLateralVelocity;
+        this.myLateralVelocity = myLateralVelocity;
+        this.myAbsLateralVelocity = Math.abs(myLateralVelocity);
+        this.myAdvancingVelocity = myAdvancingVelocity;
     }
 }

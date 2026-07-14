@@ -42,32 +42,35 @@ final class Surfing {
     private static final double DANGER_EPSILON = 0.05;       // 零窗口选项间仍按距离分优劣
 
     /**
-     * 命中 GF 统计，按「我的横向速度 × 敌我距离」分 3×3 段（对手的分段 GF 枪按局面
-     * 打我们，躲避也必须按局面记）。跨回合保留；每段在 GF0 播种，零数据时也躲 head-on。
+     * 阶段 2.5：冲浪危险改为 KNN(DC) 密度（替代 3×3 分段 bin）。
+     * 特征 = 开火时我方局面；样本 = (特征 → 命中/伪命中 GF)。评估时取 k 近邻在 GF 轴上
+     * 铺核，得到与旧 w.stats 同口径的危险数组。嵌入权重可离线梯度下降学习。
      */
-    private static final int LAT_SEGS = 3;
-    private static final int DIST_SEGS = 3;
-    private static final double[][][] STATS = new double[LAT_SEGS][DIST_SEGS][BINS];
-    static {
-        for (double[][] lat : STATS) {
-            for (double[] seg : lat) {
-                for (int x = 0; x < BINS; x++) {
-                    seg[x] = 0.1 / ((x - MID) * (x - MID) + 1);
-                }
-            }
-        }
-    }
-
-    private static double[] segmentFor(double absLatVelocity, double distance) {
-        int li = absLatVelocity < 2 ? 0 : absLatVelocity < 6 ? 1 : 2;
-        int di = distance < 350 ? 0 : distance < 550 ? 1 : 2;
-        return STATS[li][di];
-    }
+    // {bft, |latV|, advV, accel, dirTime, wallF, wallB, power}
+    // 阶段 2.5：离线梯度下降学得（ml/train_surf_weights.py），留出集硬 KNN
+    // 真实命中窗口命中率 0.251 -> 0.267（手工基线 {2,4,1,2,2,2.5,1,1.5}）
+    private static final double[] SURF_WEIGHTS = {5.682, 1.268, 0.036, 0.769, 0.476, 1.242, 1.292, 0.760};
+    private static final int SURF_DIMS = SURF_WEIGHTS.length;
+    private static final int SURF_K = 50;
+    private static final int SURF_CAPACITY = 20000;
+    private static final Knn SURF_DATA = new Knn(SURF_WEIGHTS, SURF_CAPACITY);
+    private static final double FLATTEN_SAMPLE_WEIGHT = 0.15;
 
     private static int lastSurfDirection = 1;
     private static int idleDirection = 1;
     private static int shadowPieces;  // 诊断：本场生成的阴影片段数
     private static int gunheatWaves;  // 诊断：本场生成的 gunheat 虚波数
+
+    // 特征用：加速度 / 变向时长（跨 tick）
+    private double speedT1;
+    private double speedT2;
+    private boolean hasSpeedHist;
+    private long lastDirChangeTime;
+    private int trackedLatDir = 1;
+
+    // 离线训练：-Drcr.surfdata=<csv>（配 -DNOSECURITY=true）
+    private static java.io.PrintWriter surfLog;
+    private static boolean surfLogInit;
 
     // Flattener（阶段 2.4，DrussGT 路线）：敌枪近期命中率高时把飞过的波也轻轻记成「命中」，
     // 压平躲避轮廓，让 pattern-matching / 学我们走位的 GF 枪失效。
@@ -108,7 +111,8 @@ final class Surfing {
         int direction;      // 开火时我的横向方向
         double distanceTraveled;
         boolean imaginary;  // gunheat 预测波：还没真开火，仅用于提前冲浪
-        double[] stats;     // 开火局面对应的统计段
+        double[] features;  // 开火时局面特征（KNN 查询键）
+        double[] stats;     // 缓存的危险 bin（由 KNN 近邻生成，SURF_DATA 变更后作废）
         final List<Shadow> shadows = new ArrayList<Shadow>();
     }
 
@@ -203,7 +207,8 @@ final class Surfing {
                 + " enemyHR=" + String.format(java.util.Locale.US, "%.3f",
                 PowerSelector.ENEMY.rawHitRate())
                 + " enemyHRroll=" + String.format(java.util.Locale.US, "%.3f",
-                rollingEnemyHitRate());
+                rollingEnemyHitRate())
+                + " surfKnn=" + SURF_DATA.size();
     }
 
     /** 敌人最近一次开火功率（未观测到开火时为默认 1.9），PowerSelector 建模用。 */
@@ -215,6 +220,10 @@ final class Surfing {
 
     /** 每个扫描 tick 调用：检测到开火则建波，然后推进波并执行冲浪。 */
     void onScan(Snapshot cur, Snapshot prev, double firedPower, double enemyEnergy) {
+        if (cur.myLateralDirection != trackedLatDir) {
+            trackedLatDir = cur.myLateralDirection;
+            lastDirChangeTime = cur.time;
+        }
         if (firedPower > 0 && prev != null) {
             EnemyWave w = new EnemyWave();
             w.origin = prev.enemyLocation;
@@ -223,8 +232,7 @@ final class Surfing {
             w.power = firedPower;
             w.directAngle = prev.absBearingEnemyToMe;
             w.direction = prev.myLateralDirection;
-            w.stats = segmentFor(prev.myAbsLateralVelocity,
-                    prev.myLocation.distance(prev.enemyLocation));
+            w.features = surfFeatures(prev, firedPower, cur.time - 1);
             waves.add(w);
             for (MyBullet b : myBullets) {
                 computeShadows(b, w);
@@ -241,6 +249,10 @@ final class Surfing {
         updateGunheatWave(cur, enemyEnergy);
         updateWaves(cur);
         surf(cur);
+        // 速度历史：本 tick 结束后供下一发波的加速度特征
+        speedT2 = speedT1;
+        speedT1 = Math.hypot(cur.myLateralVelocity, cur.myAdvancingVelocity);
+        hasSpeedHist = true;
     }
 
     /**
@@ -264,8 +276,7 @@ final class Surfing {
             w.power = pEst;
             w.directAngle = cur.absBearingEnemyToMe;
             w.direction = cur.myLateralDirection;
-            w.stats = segmentFor(cur.myAbsLateralVelocity,
-                    cur.myLocation.distance(cur.enemyLocation));
+            w.features = surfFeatures(cur, pEst, cur.time);
             w.imaginary = true;
             waves.add(w);
             pendingImaginary = w;
@@ -354,34 +365,149 @@ final class Surfing {
         return best;
     }
 
-    // ===================== 统计 =====================
+    // ===================== 统计（KNN） =====================
+
+    private static double factorGf(EnemyWave w, Point2D.Double target) {
+        double offset = RcMath.absoluteBearing(w.origin, target) - w.directAngle;
+        return RcMath.limit(-1, Utils.normalRelativeAngle(offset)
+                / RcMath.maxEscapeAngle(w.speed) * w.direction, 1);
+    }
 
     private static int factorIndex(EnemyWave w, Point2D.Double target) {
-        double offset = RcMath.absoluteBearing(w.origin, target) - w.directAngle;
-        double factor = Utils.normalRelativeAngle(offset)
-                / RcMath.maxEscapeAngle(w.speed) * w.direction;
-        return (int) RcMath.limit(0, factor * MID + MID, BINS - 1);
+        return (int) RcMath.limit(0, factorGf(w, target) * MID + MID, BINS - 1);
+    }
+
+    /** 真实命中：入库权重 1，并作废所有波的危险缓存。 */
+    private void logHit(EnemyWave w, Point2D.Double hitLocation) {
+        if (w.features == null) {
+            return;
+        }
+        double gf = factorGf(w, hitLocation);
+        SURF_DATA.add(w.features, gf, 1);
+        logSurfWave(w.features, gf, botGfWidth(w, hitLocation), 1);
+        invalidateDangerCaches();
     }
 
     /**
-     * 记录命中并做滚动衰减（×0.75）：对手的枪在学习/切换瞄准解，太老的命中样本
-     * 会让我们一直躲它早已不用的角度。深度 ≈ 1/(1-0.75) = 4 次命中的记忆（按段独立）。
+     * Flattener 伪命中：弱权重入库（与旧 bin +=0.15 同量级），不冲掉真实命中峰。
      */
-    private static void logHit(EnemyWave w, Point2D.Double hitLocation) {
-        int index = factorIndex(w, hitLocation);
+    private void logFlattenVisit(EnemyWave w, Point2D.Double location) {
+        if (w.features == null) {
+            return;
+        }
+        double gf = factorGf(w, location);
+        SURF_DATA.add(w.features, gf, FLATTEN_SAMPLE_WEIGHT);
+        logSurfWave(w.features, gf, botGfWidth(w, location), 0);
+        invalidateDangerCaches();
+    }
+
+    private static double botGfWidth(EnemyWave w, Point2D.Double at) {
+        double dist = Math.max(1e-3, w.origin.distance(at));
+        return Math.atan(18 / dist) / RcMath.maxEscapeAngle(w.speed);
+    }
+
+    private void invalidateDangerCaches() {
+        for (EnemyWave w : waves) {
+            w.stats = null;
+        }
+    }
+
+    /** 按波特征查 KNN，生成危险 bin（含 GF0 播种，零数据时仍躲 head-on）。 */
+    private static double[] buildDangerBins(double[] features) {
+        double[] bins = new double[BINS];
         for (int x = 0; x < BINS; x++) {
-            w.stats[x] = w.stats[x] * 0.75 + 1.0 / ((x - index) * (x - index) + 1);
+            bins[x] = 0.1 / ((x - MID) * (x - MID) + 1);
+        }
+        if (features == null || SURF_DATA.size() == 0) {
+            return bins;
+        }
+        List<Knn.Neighbor> neighbors = SURF_DATA.nearest(features,
+                Math.min(SURF_K, SURF_DATA.size()));
+        for (Knn.Neighbor nb : neighbors) {
+            int index = (int) RcMath.limit(0, nb.entry.value * MID + MID, BINS - 1);
+            double wgt = nb.entry.weight;
+            for (int x = 0; x < BINS; x++) {
+                bins[x] += wgt / ((x - index) * (x - index) + 1);
+            }
+        }
+        return bins;
+    }
+
+    private static void ensureStats(EnemyWave w) {
+        if (w != null && w.stats == null) {
+            w.stats = buildDangerBins(w.features);
         }
     }
 
     /**
-     * Flattener 伪命中：弱权重抬高「我刚走过的 GF」，不衰减真实命中峰。
-     * 全权重 + 0.75 衰减实测会把尖峰冲平，冲浪决策变噪声，敌命中率反而升高。
+     * 开火局面特征（与 ml/train_surf_weights.py 列顺序一致）。
+     * fireTime 用于变向时长；加速度用 speedT1−speedT2（开火瞬间的两档速度史）。
      */
-    private static void logFlattenVisit(EnemyWave w, Point2D.Double location) {
-        int index = factorIndex(w, location);
-        for (int x = 0; x < BINS; x++) {
-            w.stats[x] += 0.15 / ((x - index) * (x - index) + 1);
+    private double[] surfFeatures(Snapshot snap, double power, long fireTime) {
+        double dist = snap.myLocation.distance(snap.enemyLocation);
+        double speed = RcMath.bulletSpeed(power);
+        double bft = dist / speed;
+        double mea = RcMath.maxEscapeAngle(speed);
+        double accel = 0;
+        if (hasSpeedHist) {
+            accel = RcMath.limit(-2, speedT1 - speedT2, 1);
+        }
+        double[] f = new double[SURF_DIMS];
+        f[0] = RcMath.limit(0, bft / 80, 1);
+        f[1] = Math.abs(snap.myLateralVelocity) / 8;
+        f[2] = RcMath.limit(0, (snap.myAdvancingVelocity + 8) / 16, 1);
+        f[3] = (accel + 2) / 3;
+        f[4] = RcMath.limit(0, (fireTime - lastDirChangeTime) / (2 * Math.max(1, bft)), 1);
+        f[5] = orbitalWallSpace(snap.enemyLocation, snap.absBearingEnemyToMe, dist, mea,
+                snap.myLateralDirection);
+        f[6] = orbitalWallSpace(snap.enemyLocation, snap.absBearingEnemyToMe, dist, mea,
+                -snap.myLateralDirection);
+        f[7] = RcMath.limit(0, power / 3, 1);
+        return f;
+    }
+
+    /** 我沿 direction 绕敌环绕、离场前可走的轨道角度，按 1.5*MEA 归一化到 [0,1]。 */
+    private double orbitalWallSpace(Point2D.Double enemyLocation, double absBearingEnemyToMe,
+                                    double distance, double mea, int direction) {
+        double max = 1.5 * mea;
+        int steps = 20;
+        for (int i = 1; i <= steps; i++) {
+            Point2D.Double p = RcMath.project(enemyLocation,
+                    absBearingEnemyToMe + direction * (max * i / steps), distance);
+            if (!field.contains(p)) {
+                return (i - 1) / (double) steps;
+            }
+        }
+        return 1;
+    }
+
+    private static void logSurfWave(double[] f, double gf, double width, int realHit) {
+        if (!surfLogInit) {
+            surfLogInit = true;
+            String path = System.getProperty("rcr.surfdata");
+            if (path != null) {
+                try {
+                    surfLog = new java.io.PrintWriter(new java.io.BufferedWriter(
+                            new java.io.FileWriter(path, true)));
+                } catch (Exception denied) {
+                    surfLog = null;
+                }
+            }
+        }
+        if (surfLog == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder(110);
+        for (double v : f) {
+            sb.append(String.format(java.util.Locale.US, "%.4f", v)).append(',');
+        }
+        sb.append(String.format(java.util.Locale.US, "%.4f,%.4f,%d", gf, width, realHit));
+        surfLog.println(sb);
+    }
+
+    static void closeDataLog() {
+        if (surfLog != null) {
+            surfLog.flush();
         }
     }
 
@@ -790,6 +916,7 @@ final class Surfing {
     /** 角度窗口 → GF 窗口 → 覆盖 bin 的统计质量之和（bin 按阴影遮蔽比例打折）。 */
     private static double intervalMass(EnemyWave w, double minOff, double maxOff,
                                        List<double[]> extraShadows) {
+        ensureStats(w);
         double mea = RcMath.maxEscapeAngle(w.speed);
         double gfA = RcMath.limit(-1, minOff / mea * w.direction, 1);
         double gfB = RcMath.limit(-1, maxOff / mea * w.direction, 1);
