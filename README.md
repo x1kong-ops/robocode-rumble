@@ -19,8 +19,9 @@ src/rcr/GeomTest.java                精确交点的暴力采样自检（java -c
 src/rcr/ShadowTest.java              bullet shadow 几何的暴力采样自检（同上，rcr.ShadowTest）
 scripts/build.ps1                    编译脚本（输出到 out/classes，保持 Java 8 兼容）
 scripts/run-battle.ps1               打包部署 + 无头对战 + 输出战果（-ExtraJvmArgs 可传附加 JVM 参数）
-scripts/testbed.ps1                  8 对手基准测试组一键跑分
-scripts/datagen.ps1                  批量采集枪波训练数据到 ml/data/*.csv（11 对手 × N 场）
+scripts/testbed.ps1                  8 对手基准测试组一键跑分（中游风格覆盖）
+scripts/hardbed.ps1                  强对手验证组（本机顶级/次顶级 rumble bot，支持 -Tier top|strong|all）
+scripts/datagen.ps1                  批量采集枪/冲浪训练数据到 ml/data/*.csv
 ml/train_gun_weights.py              PyTorch 训练枪 KNN 嵌入权重
 ml/train_surf_weights.py             PyTorch 训练冲浪 KNN 嵌入权重
 ml/eval_per_enemy.py                 枪权重按对手分解验证
@@ -128,7 +129,12 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
   - **数据**：`datagen -Surf` + 强对手加采，约 1.1 万行（含 flatten）；弱对手几乎打不中我们，样本主要来自 surfer / pattern matcher；
   - **训练**（`ml/train_surf_weights.py`）：与枪同构的 soft-KNN NLL，真实命中 3× 权重；留出集硬 KNN **0.251 → 0.267（+6.6%）**。学到的口径：bft 权重大幅上调，advV 几乎归零（冲浪局面里「离多远」比「是否逼近」更分得开）；
   - **实测（3×100 平均，相对 2.4）**：Komarious 71.7% → **73.3%**；Cigaret 64.0% → **66.3%**；BasicGFSurfer 84.7%（85.7%，噪声内）；DuelistMini 82.3%（83.7%，噪声内）；0 skipped turns；`surfKnn` 已入 `stats.txt`。
-- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重~~ → ~~期望得分最大化能量管理~~ → ~~主动子弹阴影~~ → ~~flattener~~ → ~~走位统计 KNN 化 + 嵌入权重学习~~。阶段 2 算法项全部完成；后续是更强对手集验证 / 正式报名（改包名、1.9.4.2、上传）。
+- **阶段 2（第 2–4 月，目标前 5 / 90+ APS）**：~~离线梯度下降学 KNN 嵌入权重~~ → ~~期望得分最大化能量管理~~ → ~~主动子弹阴影~~ → ~~flattener~~ → ~~走位统计 KNN 化 + 嵌入权重学习~~。阶段 2 算法项全部完成；后续是正式报名（改包名、1.9.4.2、上传）。
+- **强对手集验证（2026-07-13，`scripts/hardbed.ps1`，各 3×100）**：
+  - **Top tier**（本机 BeepBoop / DrussGT / Diamond / Saguaro 0.1 / Ascendant）：整体平均 **41.7%**。对 DrussGT **43.0%**、Ascendant **49.7%**、Saguaro **56.3%** 过 40% 线；对 BeepBoop **22.7%**、Diamond **36.7%** 未过。报告门槛「对 BeepBoop/DrussGT/Diamond 均 40%+」**未完全达标**（3 里过 1）。
+  - **Strong tier**（WaveSerpent / RougeDC / Gilgalad / Shadow / Dookious / Gaff / Yngwie / Snow）：整体平均 **59.3%**。≥70%：Yngwie 80.3%、Snow 77.7%；其余 44–66%。报告「全体无 <70%」在强组上**未达标**——符合预期：本地 8-bot testbed（~86%）高估了相对全榜 APS。
+  - 解读：对次顶尖已有可打性（多在 45–60%），对榜首仍明显偏弱；APS 冲前 5 还要靠对全体中游的稳定虐菜 + 继续抬顶尖配对，而不是只盯 BeepBoop。
+  - 复跑：`.\scripts\hardbed.ps1 -Tier top` / `-Tier strong` / `-Tier all`；结果写入 `out/hardbed-*.txt`。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
 
