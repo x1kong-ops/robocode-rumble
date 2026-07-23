@@ -42,4 +42,32 @@ final class RcMath {
         }
         return angle;
     }
+
+    /**
+     * 敌人匀速滑行一步（保持 heading；撞墙贴边并速度清零）。
+     * velocityInOut[0] 为当前速度，可能被改写为 0。
+     */
+    static Point2D.Double coastStep(Point2D.Double pos, double heading, double[] velocityInOut,
+                                    Rectangle2D.Double field) {
+        double v = velocityInOut[0];
+        double x = pos.x + Math.sin(heading) * v;
+        double y = pos.y + Math.cos(heading) * v;
+        if (!field.contains(x, y)) {
+            x = limit(field.x, x, field.x + field.width);
+            y = limit(field.y, y, field.y + field.height);
+            velocityInOut[0] = 0;
+        }
+        return new Point2D.Double(x, y);
+    }
+
+    /** 反解「造成至少 damage 点伤害」所需的最小子弹功率（钳位到 [0.1, 3]）。 */
+    static double powerToDealDamage(double damage) {
+        if (damage <= 0) {
+            return 0.1;
+        }
+        if (damage <= 4) {
+            return limit(0.1, damage / 4, 3);
+        }
+        return limit(0.1, (damage + 2) / 6, 3);
+    }
 }

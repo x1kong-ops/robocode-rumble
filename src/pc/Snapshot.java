@@ -17,10 +17,15 @@ final class Snapshot {
     final double myLateralVelocity;
     /** 有符号接近速度：>0 表示朝敌人逼近。 */
     final double myAdvancingVelocity;
+    /** 车身朝向（Crowd surfing 圆形预测用）。 */
+    final double myHeading;
+    /** Robocode 有符号速度（Crowd surfing 线性/圆形预测用）。 */
+    final double myVelocity;
 
     Snapshot(long time, Point2D.Double myLocation, Point2D.Double enemyLocation,
              int myLateralDirection, double absBearingEnemyToMe,
-             double myLateralVelocity, double myAdvancingVelocity) {
+             double myLateralVelocity, double myAdvancingVelocity,
+             double myHeading, double myVelocity) {
         this.time = time;
         this.myLocation = myLocation;
         this.enemyLocation = enemyLocation;
@@ -29,5 +34,7 @@ final class Snapshot {
         this.myLateralVelocity = myLateralVelocity;
         this.myAbsLateralVelocity = Math.abs(myLateralVelocity);
         this.myAdvancingVelocity = myAdvancingVelocity;
+        this.myHeading = myHeading;
+        this.myVelocity = myVelocity;
     }
 }

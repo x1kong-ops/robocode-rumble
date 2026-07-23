@@ -60,6 +60,11 @@ public final class ShadowTest {
                 boolean collided = bruteCollide(w, gf, mea, bo, bAngle, bSpeed, bFire);
                 boolean inShadow = false, nearEdge = false;
                 for (double[] s : shadows) {
+                    // 只校验权 1 的同 tick 精确阴影；0.5 的 t±1 重叠不要求暴力对撞
+                    double wt = s.length > 3 ? s[3] : 1.0;
+                    if (wt < 0.99) {
+                        continue;
+                    }
                     if (gf >= s[0] - tol && gf <= s[1] + tol) {
                         inShadow = true;
                     }

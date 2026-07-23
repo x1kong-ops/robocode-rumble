@@ -135,6 +135,40 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
   - **Strong tier**（WaveSerpent / RougeDC / Gilgalad / Shadow / Dookious / Gaff / Yngwie / Snow）：整体平均 **59.3%**。≥70%：Yngwie 80.3%、Snow 77.7%；其余 44–66%。报告「全体无 <70%」在强组上**未达标**——符合预期：本地 8-bot testbed（~86%）高估了相对全榜 APS。
   - 解读：对次顶尖已有可打性（多在 45–60%），对榜首仍明显偏弱；APS 冲前 5 还要靠对全体中游的稳定虐菜 + 继续抬顶尖配对，而不是只盯 BeepBoop。
   - 复跑：`.\scripts\hardbed.ps1 -Tier top` / `-Tier strong` / `-Tier all`；结果写入 `out/hardbed-*.txt`。
+- **报名 RoboRumble（2026-07-23）**：wiki 账号 `JustinKong971013`；Participants 已加入 `pc.Wavelet 1.0`；本机 `C:\robocode-1.9.4.2` 客户端 `USER=JustinKong971013` 已在跑。
+- **阶段 3.1 主枪精确预测 + 残血冲撞（2026-07-23）**：
+  - **主枪精确选角**：非 AS 枪时，在 KDE top 候选 + 匀速滑行 GF 上做几何命中校验，取 `density × (1+0.25×hit)`；密度门控 ≥0.6×峰值（更激进的 0.2+0.8×hit 曾使 Cigaret 掉到 55%，已弃）。
+  - **tryToDisable + ram**：残血压到刚好打残的功率；`enemyEnergy < 0.1` 停火并直冲撞击（有在途敌波时仍优先冲浪）。
+  - **实测**：50 回合 testbed **88.9%**（报名前置 ~86.4%）；3×100：BasicGFSurfer **85.0%**、Komarious **72.0%**、Cigaret **63.3%**、DuelistMini **80.3%**（冲浪/pattern 带内持平，sample/直线系抬平均）。`preciseRefine` 已入 `stats.txt`。
+  - **下一步 3.2**：Crowd surfing（HOT/线性/圆形自模拟融合危险）。
+- **阶段 3.2 Crowd surfing（2026-07-23）**：
+  - **机制**：每条敌波在开火快照上预计算 HOT(=GF0) / 线性滑行 / 圆形（+omega）自模拟瞄准 GF；危险 = **完整 KNN bin** + softmax(模型分)×峰的叠加。命中与子弹对撞都更新模型分（对撞无走位选择偏差）。
+  - **试过并放弃**：softmax 同时缩放 KNN（testbed 88.9→86.5，简单枪权重过大稀释冲浪）；改为 KNN 不稀释、峰幅 `CROWD_PEAK_SCALE=3.5`。
+  - **实测**：50 回合 testbed **88.0% / 87.5%**（3.1 为 88.9%，噪声带内）；3×100：BasicGFSurfer **84.0%**、Komarious **70.0%**、Cigaret **66.7%**（3.1 为 63.3%）、Tracker/GouldingiHT **~100%**。`crowdUpd/crowdW` 已入 `stats.txt`。
+  - **下一步 3.3**：主动阴影加深（候选扩至 ~20 + 50% t±1 阴影）。
+- **阶段 3.3 主动阴影加深（2026-07-23）**：
+  - **50% t±1 阴影**（BeepBoop）：`shadowIntervals` 在同 tick 精确阴影外，对 `(bullet_t, wave_{t−1})` 与 `(bullet_{t−1}, wave_t)` 各加权 0.5；`shadowedFraction` 改为加权扫描线（点上累加钳到 1）。`ShadowTest` 仍只校验权 1 片，**PASSED**。
+  - **候选扩容**：KDE top-12 + 稀疏密度网格（≥0.25×峰值）+ helpful 拦截角；`aimFloor` 提到 **0.42×峰值**（0.35+密网格曾使 Komarious 单场掉到 63%）。
+  - **实测**：testbed 50 **88.5% / 89.0%**；3×100：BasicGFSurfer **84.0%**、Komarious **74.0%**（3.2 为 70%）、Cigaret **66.0%**、DuelistMini **81.7%**。
+  - **下一步 3.4**：Path/GoTo 融合走位。
+- **阶段 3.4 Path/GoTo 融合（2026-07-23）**：
+  - **机制**（BeepBoop PathSurfing 轻量版）：先评 True 三选项；ETA≥6 时再评 ≤10 条 Path——两阶段（冲→停 / 停→冲 / 冲→反向）+ 波圆轨道 GoTo 点（lean×距离）。需危险低 **0.02** 以上才换 Path（抑抖）。主动阴影危险 = 0.65×选中方案 + 0.35×True 最小可达。
+  - **实测**：testbed 50 **88.9% / 87.5%**；3×100：BasicGFSurfer **85.7%**、Komarious **74.7%**、Cigaret **70.0%**、DuelistMini **83.3%**；`skippedTurns=0`，`wallHits≈0–1`，`pathWins` 已入 `stats.txt`。
+  - **下一步 3.5**：用 rumble 代表对手重训枪/冲浪权重；或等 LiteRumble problem-bot 列表驱动。
+- **阶段 3.5 rumble 数据重训权重（2026-07-23）**：
+  - **数据**：`datagen -Pool all -Battles 2 -Rounds 40 -Fresh` → **枪 1,319,555 波 / 冲浪 71,087 行**（含 BeepBoop/DrussGT/Diamond/Saguaro 等 hardbed 全员 + 中游）。
+  - **训练**：以线上权重为 Adam 起点；枪硬 KNN 留出 **0.4098→0.4081（−0.4%）**；冲浪 **0.7190→0.7323（+1.8%）**（advV/power 权重回升，wallB 下降）。
+  - **导出**：`WEIGHTS={5.290,0.841,2.623,0.573,1.096,1.342,0.980,0.621}`；`SURF_WEIGHTS={5.388,1.368,1.721,0.763,1.204,0.988,0.258,1.251}`。
+  - **实测**：testbed 50 **88.5%**；3×100：BasicGFSurfer **87.0%**（3.4 为 85.7%）、Komarious **75.0%**、Cigaret **68.7%**、DuelistMini **83.3%**。
+  - **下一步 3.6**：三波前瞻。
+- **阶段 3.6 三波前瞻（2026-07-23）**：
+  - **机制**：冲浪总分 `D1 + 0.5×min(D2) + 0.25×min(D3)`。第三波只从危险最低的第二波终点继续（True：再开三选项；Path：单续航近似，控 CPU）。主动阴影假想片同步挂到 w3；`stats.txt` 增加 `thirdWave=`。
+  - **实测**：testbed 50 **87.5% / 89.4%**；3×100：BasicGFSurfer **86.7%**、Komarious **73.7%**、Cigaret **71.0%**（3.5 为 68.7%）、DuelistMini **82.7%**；`skippedTurns=0`，`wallHits=0`，`thirdWave` 活跃。
+  - **下一步 3.7**：可选 kd-tree。
+- **阶段 3.7 kd-tree KNN（2026-07-23）**：
+  - **机制**：增长期（未满容且样本数 >512）增量 kd-tree + 加权距离剪枝；满容环形淘汰后回退线性（覆盖会破坏空间不变量，全量重建曾导致 `skippedTurns` 飙升）。`KnnTest` 对照线性扫描通过。
+  - **实测**：微基准 30k×8D 查询约 **2×** 快于线性；BasicGFSurfer 100 回合 `skippedTurns=0`。
+  - **下一步**：已打包 **v1.2** 上传 rumble（见下方参赛备忘）。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
 
@@ -143,22 +177,22 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
 ### 本机已就绪
 
 - **评分客户端 1.9.4.2**：已解压到 `C:\robocode-1.9.4.2`（开发仍可用 `C:\robocode` 1.10.3）。
-- **打包脚本**：`.\scripts\package-upload.ps1 -Version 1.0 -RobocodeHome C:\robocode-1.9.4.2` → 产出 `dist\<classname>_1.0.jar`。
+- **打包脚本**：`.\scripts\package-upload.ps1 -Version 1.2 -RobocodeHome C:\robocode-1.9.4.2` → 产出 `dist\<classname>_1.2.jar`。
 - **改包名脚本**：`.\scripts\rename-package.ps1 -NewPackage <你的唯一包.类名>`（例 `pc.Wavelet`；**不能有下划线**，须全局唯一）。
-- 1.9.4.2 冒烟已通过（vs sample.Tracker 10 回合）；强对手 JAR 已同步进该安装的 `robots/`。
+- 1.9.4.2 冒烟已通过（vs sample.Tracker）；强对手 JAR 已同步进该安装的 `robots/`。
 
 ### 进度（`pc.Wavelet`）
 
 1. ~~改包名~~ → **`pc.Wavelet`**（源码在 `src/pc/`）。
 2. ~~1.9.4.2 testbed~~ → 50 回合平均 **86.4%**（与 1.10.3 开发机一致）。
-3. ~~打包~~ → `dist/pc.Wavelet_1.0.jar`（也已部署到 `C:\robocode-1.9.4.2\robots\`）。
+3. ~~打包~~ → `dist/pc.Wavelet_1.2.jar`（已部署到 `C:\robocode-1.9.4.2\robots\`）。
 4. ~~托管 JAR~~ → GitHub Release：  
-   https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.0/pc.Wavelet_1.0.jar
-5. **RoboWiki Participants**（待你编辑 wiki）：按字母序加一行（逗号后无空格）：  
-   `pc.Wavelet 1.0,https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.0/pc.Wavelet_1.0.jar`
-6. （可选）跑 rumble 客户端：编辑 `C:\robocode-1.9.4.2\roborumble\roborumble.txt` 用户名后运行 `roborumble.bat`。
+   https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.2/pc.Wavelet_1.2.jar
+5. **RoboWiki Participants**（删掉旧版行，换成）：  
+   `pc.Wavelet 1.2,https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.2/pc.Wavelet_1.2.jar`
+6. 跑 rumble：`C:\robocode-1.9.4.2\roborumble\roborumble.bat`（`USER=JustinKong971013`；本机 `particip1v1.txt` 已临时指到 1.2）。
 
-仓库：https://github.com/x1kong-ops/robocode-rumble · Release：https://github.com/x1kong-ops/robocode-rumble/releases/tag/v1.0
+仓库：https://github.com/x1kong-ops/robocode-rumble · Release：https://github.com/x1kong-ops/robocode-rumble/releases/tag/v1.2
 
 规则摘要：须有 package、JAR、同目录 `.properties`；命名与内部结构一致；Java 8–17 字节码均可（本项目 `--release 8`）。
 

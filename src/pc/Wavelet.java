@@ -85,7 +85,8 @@ public class Wavelet extends AdvancedRobot {
         }
         Snapshot cur = new Snapshot(getTime(), myLocation, enemyLocation,
                 myLateralDirection, absBearingEnemyToMe,
-                myLateralVelocity, myAdvancingVelocity);
+                myLateralVelocity, myAdvancingVelocity,
+                getHeadingRadians(), getVelocity());
 
         // 开火检测：能量下降 (0.09, 3.01) 视为开火（事件优先级保证扫描前已处理 HitByBullet 等）
         double drop = enemyEnergy - e.getEnergy();

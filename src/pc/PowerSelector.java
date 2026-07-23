@@ -117,13 +117,23 @@ final class PowerSelector {
                 MY.totalDamage, ENEMY.totalDamage, h);
     }
 
+    /** 敌人已残废（能量≈0）：停火改冲撞刷 ram 分。 */
+    static boolean shouldRam(double enemyEnergy) {
+        return enemyEnergy < 0.1;
+    }
+
     /**
-     * 选功率。可能返回 <0.1，含义是「这个局面不该开火」（低能量护领先），调用方跳过开火。
+     * 选功率。可能返回 <0.1，含义是「这个局面不该开火」（低能量护领先 / 残血冲撞），调用方跳过开火。
      */
     static double choosePower(double myEnergy, double enemyEnergy, double distance,
                               double lastEnemyPower, int roundNum, double coolingRate) {
+        if (shouldRam(enemyEnergy)) {
+            return -1; // 已 disable：子弹击杀不如撞击补分
+        }
         Profile enemy = new Profile(
                 Math.min(Math.max(0, enemyEnergy), lastEnemyPower), false, coolingRate);
+        // 一发打残（能量→0）所需功率；超过则浪费、还可能直接击杀丢掉撞分窗口
+        double disablePower = RcMath.powerToDealDamage(enemyEnergy);
         double minimumKillPower = enemyEnergy > 4 ? (enemyEnergy + 2) / 6 : enemyEnergy / 4;
         // 打得中的对手（命中率上界 >0.2）用 ABS 粗表：专攻 BasicSurfer 系 bug 且避免
         // 模型误差驱动的细碎降档；躲得好的对手用细表做能量战优化
@@ -147,6 +157,10 @@ final class PowerSelector {
         }
 
         bestPower = Math.max(0.1, Math.min(bestPower, minimumKillPower)); // 正好打死即可
+        // tryToDisable：残血时压到刚好打残的功率，留撞击窗口（BeepBoop 路线）
+        if (enemyEnergy <= 16.0001 && Rules.getBulletDamage(bestPower) > enemyEnergy + 0.4) {
+            bestPower = Math.min(bestPower, disablePower);
+        }
         bestPower = Math.min(bestPower, myEnergy - MIN_ENERGY);
         if (distance < FULL_POWER_DISTANCE) {
             bestPower = Math.max(bestPower, 0.1);

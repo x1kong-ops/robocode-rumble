@@ -27,7 +27,8 @@ final class KnnGun {
     // 特征权重：{子弹飞行时间, |横向速度|, 接近速度, 加速度, 方向未变时长, 前墙空间, 后墙空间, 近8tick位移}
     // 阶段 2.1：离线梯度下降学得（ml/train_gun_weights.py，soft-KNN NLL），
     // 留出集硬 KNN 车身窗口命中率 0.322 -> 0.341（手工权重基线 {2,4,1,2,2,2.5,1,2}）
-    private static final double[] WEIGHTS = {5.001, 0.832, 2.843, 0.457, 1.532, 1.692, 0.824, 0.606};
+    // 阶段 3.5：rumble 全池重训（离线硬 KNN 相对线上基线 -0.4%，比例微调）
+    private static final double[] WEIGHTS = {5.290, 0.841, 2.623, 0.573, 1.096, 1.342, 0.980, 0.621};
     private static final int DIMS = WEIGHTS.length;
 
     // 通用枪
@@ -56,6 +57,7 @@ final class KnnGun {
     // 连中片段里冲过阈值、误触发重弹（弹速慢 → 逃逸角大 → 更好躲），来回震荡两头亏
     private static int myShots;
     private static int myHits;
+    private static int preciseRefineUses; // 诊断：主枪精确预测改角次数
 
     private final AdvancedRobot robot;
     private final Surfing surfing; // 开火时通知铺 bullet shadow
@@ -98,8 +100,10 @@ final class KnnGun {
     /** 健康指标：两枪虚拟命中率、AS 枪使用量、实弹命中率。 */
     static String gunStats() {
         double n = Math.max(1e-9, scoreNorm);
-        return String.format("gunMain=%.3f gunAS=%.3f realWaves=%d asFired=%d hitRate=%.3f myShots=%d",
-                mainScore / n, asScore / n, realWaves, asFired, myHitRate(), myShots);
+        return String.format(
+                "gunMain=%.3f gunAS=%.3f realWaves=%d asFired=%d hitRate=%.3f myShots=%d preciseRefine=%d",
+                mainScore / n, asScore / n, realWaves, asFired, myHitRate(), myShots,
+                preciseRefineUses);
     }
 
     /** Wavelet.onBulletHit 转发：我的子弹命中敌人。 */
@@ -176,6 +180,17 @@ final class KnnGun {
         w.gfAs = kdeAs.bestGf();
         boolean useAs = useAsGun();
         double gf = useAs ? w.gfAs : w.gfMain;
+
+        // 主枪：匀速滑行精确预测校验候选 GF（AS 枪对手会反应反应，不做线性假设）
+        if (!useAs && MAIN_DATA.size() > 0) {
+            double refined = refineMainGf(kdeMain, gf, myLocation, enemyLocation,
+                    enemyHeading, enemyVelocity, absBearing, mea, bulletSpeed);
+            if (Math.abs(refined - gf) > 0.01) {
+                preciseRefineUses++;
+            }
+            gf = refined;
+            w.gfMain = gf;
+        }
 
         // 主动子弹阴影：临开火（≤1 tick 枪冷）时在候选角里选「命中分 / 冲浪危险^β」最优
         boolean nearFire = robot.getGunHeat() <= robot.getGunCoolingRate() + 1e-9
@@ -331,10 +346,106 @@ final class KnnGun {
     }
 
     /**
-     * 主动子弹阴影（阶段 2.3，BeepBoop Aimer 思路）：临开火 tick 在「KDE 高分候选 +
-     * 有用阴影角」里选 aimScore / danger^β 最优的开火 GF。danger = 假想这发子弹铺出
-     * 阴影后我当前走位方案的冲浪危险；β 随敌我命中率比和功率比缩放——对手打不中我
-     * 或只打小弹时，少为阴影牺牲命中率。
+     * 主枪精确预测选角（阶段 3.1）：在 KDE 高分候选 + 匀速滑行 GF 上，
+     * 用「敌人保持当前速度/朝向滑行」做子弹到达几何命中校验，
+     * 取 density × (0.2 + 0.8×hit) 最高者。对 Tracker/Walls/直线走位收益最大。
+     */
+    private double refineMainGf(Kde kde, double gfAim, Point2D.Double myLocation,
+                                Point2D.Double enemyLocation, double enemyHeading,
+                                double enemyVelocity, double absBearing, double mea,
+                                double bulletSpeed) {
+        List<Double> candidates = kde.topCandidates(8, 0.04);
+        if (!candidates.contains(gfAim)) {
+            candidates.add(0, gfAim);
+        }
+        double linGf = linearPredictGf(myLocation, enemyLocation, enemyHeading,
+                enemyVelocity, absBearing, mea, bulletSpeed);
+        if (Math.abs(linGf) <= 0.99) {
+            boolean has = false;
+            for (double c : candidates) {
+                if (Math.abs(c - linGf) < 0.02) {
+                    has = true;
+                    break;
+                }
+            }
+            if (!has) {
+                candidates.add(linGf);
+            }
+        }
+        // 密度门控：几何命中只在接近 KDE 峰值的候选里做微调，避免匀速假设
+        // 带偏振荡/pattern 走位（Cigaret 上曾用 0.2+0.8×hit 掉约 10%）
+        double peak = Math.max(1e-9, kde.density(gfAim));
+        double aimFloor = 0.6 * peak;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        double bestGf = gfAim;
+        for (double gf : candidates) {
+            double dens = kde.density(gf);
+            if (dens < aimFloor && Math.abs(gf - gfAim) > 1e-9) {
+                continue;
+            }
+            double fireAngle = Utils.normalAbsoluteAngle(
+                    absBearing + gf * mea * enemyLateralDirection);
+            double hit = geometricHit(myLocation, enemyLocation, enemyHeading,
+                    enemyVelocity, fireAngle, bulletSpeed);
+            double score = dens * (1 + 0.25 * hit);
+            if (score > bestScore) {
+                bestScore = score;
+                bestGf = gf;
+            }
+        }
+        return bestGf;
+    }
+
+    /** 假设敌人匀速滑行，子弹沿直线飞行时到达处对应的 GF。 */
+    private double linearPredictGf(Point2D.Double myLocation, Point2D.Double enemyLocation,
+                                   double enemyHeading, double enemyVelocity,
+                                   double absBearing, double mea, double bulletSpeed) {
+        Point2D.Double ePos = new Point2D.Double(enemyLocation.x, enemyLocation.y);
+        double[] eV = {enemyVelocity};
+        int ticks = 0;
+        while (ticks < 110) {
+            ticks++;
+            ePos = RcMath.coastStep(ePos, enemyHeading, eV, field);
+            if (ticks * bulletSpeed >= myLocation.distance(ePos)) {
+                break;
+            }
+        }
+        double offset = Utils.normalRelativeAngle(
+                RcMath.absoluteBearing(myLocation, ePos) - absBearing);
+        return RcMath.limit(-1, offset / mea * enemyLateralDirection, 1);
+    }
+
+    /**
+     * 子弹与敌人匀速滑行的几何命中（1=会打中 36×36 车身，0=否）。
+     * 仅用于主枪候选排序，不替代 KDE 学习。
+     */
+    private double geometricHit(Point2D.Double myLocation, Point2D.Double enemyLocation,
+                                double enemyHeading, double enemyVelocity,
+                                double fireAngle, double bulletSpeed) {
+        Point2D.Double ePos = new Point2D.Double(enemyLocation.x, enemyLocation.y);
+        double[] eV = {enemyVelocity};
+        double halfDiag = 18 * Math.sqrt(2);
+        for (int t = 1; t <= 110; t++) {
+            ePos = RcMath.coastStep(ePos, enemyHeading, eV, field);
+            Point2D.Double bPos = RcMath.project(myLocation, fireAngle, t * bulletSpeed);
+            if (bPos.x < -18 || bPos.x > field.x + field.width + 36
+                    || bPos.y < -18 || bPos.y > field.y + field.height + 36) {
+                return 0;
+            }
+            if (Math.abs(bPos.x - ePos.x) <= 18 && Math.abs(bPos.y - ePos.y) <= 18) {
+                return 1;
+            }
+            if (myLocation.distance(bPos) > myLocation.distance(ePos) + halfDiag + bulletSpeed) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * 主动子弹阴影（阶段 2.3 / 3.3，BeepBoop Aimer 思路）：临开火 tick 在约 20 个候选
+     * （KDE top + 密度网格采样 + 有用阴影角）里选 aimScore / danger^β 最优开火 GF。
+     * danger 含 50% t±1 重叠阴影；β 随敌我命中率比和功率比缩放。
      */
     private double activeShadowGf(Kde kde, double gfAim, Point2D.Double myLocation,
                                   double absBearing, double mea, double bulletSpeed,
@@ -343,28 +454,20 @@ final class KnnGun {
         if (baseline < 0) {
             return gfAim; // 没有在冲的波，阴影无从谈起
         }
-        List<Double> candidates = kde.topCandidates(8, 0.04);
-        if (!candidates.contains(gfAim)) {
-            candidates.add(0, gfAim);
-        }
-        for (double angle : surfing.helpfulShadowAngles(myLocation, bulletSpeed, time)) {
-            double gf = Utils.normalRelativeAngle(angle - absBearing)
-                    / mea * enemyLateralDirection;
-            if (Math.abs(gf) < 0.99) {
-                candidates.add(gf);
-            }
-        }
+        List<Double> candidates = buildShadowCandidates(kde, gfAim, myLocation,
+                absBearing, mea, bulletSpeed, time);
         double beta = Math.pow(
                 PowerSelector.ENEMY.rawHitRate() / PowerSelector.MY.rawHitRate()
                         * surfing.lastEnemyPower() / power, 0.25);
         // 命中分下限：阴影再好也不打「几乎不可能命中」的子弹——能量战里白扔一发的
         // 代价（-p 无返还）对紧平衡对手（如 Komarious）是净亏，实测不设门全线回退
-        double aimFloor = 0.35 * kde.density(gfAim);
+        // 3.3 候选变多后略抬门限，避免为阴影牺牲太多命中（0.35+网格曾使 Komarious 掉到 63%）
+        double aimFloor = 0.42 * kde.density(gfAim);
         double bestScore = Double.NEGATIVE_INFINITY;
         double bestGf = gfAim;
         for (double gf : candidates) {
             double aimScore = kde.density(gf);
-            if (aimScore < aimFloor && gf != gfAim) {
+            if (aimScore < aimFloor && Math.abs(gf - gfAim) > 1e-9) {
                 continue;
             }
             double fireAngle = Utils.normalAbsoluteAngle(
@@ -384,6 +487,41 @@ final class KnnGun {
             Surfing.noteActiveShadowShot();
         }
         return bestGf;
+    }
+
+    /**
+     * 主动阴影候选：KDE top-12 + 稀疏密度网格（≥0.25×峰值）+ helpful 拦截角，约 16–20 个。
+     * 确定性采样；过密网格曾引入低密度角、能量战吃亏。
+     */
+    private List<Double> buildShadowCandidates(Kde kde, double gfAim,
+                                               Point2D.Double myLocation, double absBearing,
+                                               double mea, double bulletSpeed, long time) {
+        List<Double> candidates = kde.topCandidates(12, 0.03);
+        addCandidate(candidates, gfAim, 0.02);
+        double peak = Math.max(1e-9, kde.density(gfAim));
+        for (int i = 0; i <= 16; i++) {
+            double gf = -1.0 + i * (2.0 / 16.0);
+            if (kde.density(gf) >= 0.25 * peak) {
+                addCandidate(candidates, gf, 0.05);
+            }
+        }
+        for (double angle : surfing.helpfulShadowAngles(myLocation, bulletSpeed, time)) {
+            double gf = Utils.normalRelativeAngle(angle - absBearing)
+                    / mea * enemyLateralDirection;
+            if (Math.abs(gf) < 0.99) {
+                addCandidate(candidates, gf, 0.03);
+            }
+        }
+        return candidates;
+    }
+
+    private static void addCandidate(List<Double> candidates, double gf, double minGap) {
+        for (double x : candidates) {
+            if (Math.abs(x - gf) < minGap) {
+                return;
+            }
+        }
+        candidates.add(gf);
     }
 
     /** 离线训练数据：features..., gf, gf半宽, 是否实弹。无 -Drcr.datalog 或无权限时静默关闭。 */

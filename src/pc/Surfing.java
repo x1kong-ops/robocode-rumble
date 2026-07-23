@@ -14,7 +14,8 @@ import robocode.Bullet;
 import robocode.util.Utils;
 
 /**
- * True Surfing 走位（阶段 1.1：precise prediction + precise intersection + 两波冲浪）。
+ * True Surfing 走位（阶段 1.1 起：precise prediction + precise intersection；
+ * 阶段 3.6：三波前瞻）。
  *
  * 决策流程（每 tick）：
  *  1. 取最近的可冲浪敌波 w1，对三个选项（逆时针 / 刹停 / 顺时针）各做一次精确预测：
@@ -23,7 +24,8 @@ import robocode.util.Utils;
  *     把窗口覆盖的全部 GF bin 统计质量求和 × 子弹伤害 = 该选项在 w1 上的危险 D1；
  *     （窗口为空 = 完全躲开，D1 = 0——这正是精确交点的价值）
  *  3. 从 w1 越过后的状态出发，对下一波 w2 的三个选项再做同样预测，取 min D2；
- *  4. 执行 total = D1 + 0.5 * min(D2) 最小的选项。
+ *  4. 仅从危险最低的第二波终点继续：对 w3 再评三选项（True）或单续航（Path），取 min D3；
+ *  5. 执行 total = D1 + 0.5×min(D2) + 0.25×min(D3) 最小的选项。
  *
  * 时序对齐（与 Robocode 引擎一致）：子弹在 tick T 扫过 [r(T-1), r(T)]，
  * 碰撞判定用我在 T-1 结束时的位置；波半径 r(T) = (T - fireTime) * speed。
@@ -38,6 +40,7 @@ final class Surfing {
     // 距离控制
     private static final double DESIRED_DISTANCE = 450;
     private static final double SECOND_WAVE_WEIGHT = 0.5;
+    private static final double THIRD_WAVE_WEIGHT = 0.25; // 阶段 3.6：第三波低权前瞻
     private static final double DIVE_PROTECT_DISTANCE = 360; // 低于此预测敌距开始惩罚俯冲
     private static final double DANGER_EPSILON = 0.05;       // 零窗口选项间仍按距离分优劣
 
@@ -49,7 +52,8 @@ final class Surfing {
     // {bft, |latV|, advV, accel, dirTime, wallF, wallB, power}
     // 阶段 2.5：离线梯度下降学得（ml/train_surf_weights.py），留出集硬 KNN
     // 真实命中窗口命中率 0.251 -> 0.267（手工基线 {2,4,1,2,2,2.5,1,1.5}）
-    private static final double[] SURF_WEIGHTS = {5.682, 1.268, 0.036, 0.769, 0.476, 1.242, 1.292, 0.760};
+    // 阶段 3.5：rumble 全池重训（离线硬 KNN 0.719→0.732，+1.8%；advV/power 权重回升）
+    private static final double[] SURF_WEIGHTS = {5.388, 1.368, 1.721, 0.763, 1.204, 0.988, 0.258, 1.251};
     private static final int SURF_DIMS = SURF_WEIGHTS.length;
     private static final int SURF_K = 50;
     private static final int SURF_CAPACITY = 20000;
@@ -67,6 +71,9 @@ final class Surfing {
     private boolean hasSpeedHist;
     private long lastDirChangeTime;
     private int trackedLatDir = 1;
+    private double lastMyHeading;
+    private double lastOmega; // 上一扫描 tick 观测到的转向量（供 prev 波圆形预测）
+    private boolean hasMyHeading;
 
     // 离线训练：-Drcr.surfdata=<csv>（配 -DNOSECURITY=true）
     private static java.io.PrintWriter surfLog;
@@ -88,6 +95,20 @@ final class Surfing {
     private static boolean flattenerOn;
     private static int flattenVisits;
 
+    // Crowd surfing（阶段 3.2）：KNN + HOT/线性/圆形自模拟，按「预测是否贴近开火 GF」动态加权
+    // 索引：0=KNN 1=HOT 2=LINEAR 3=CIRCULAR；先验给简单枪一点质量（榜上大量 HOT/线性）
+    private static final int MODEL_KNN = 0;
+    private static final int MODEL_HOT = 1;
+    private static final int MODEL_LIN = 2;
+    private static final int MODEL_CIRC = 3;
+    private static final int MODEL_COUNT = 4;
+    private static final double[] MODEL_SCORE = {2.0, 1.0, 0.9, 0.7};
+    private static final double MODEL_SCORE_DECAY = 0.97;
+    private static final double MODEL_MATCH_SIGMA = 0.18;
+    // 叠加到完整 KNN 上的简单枪峰幅（过大稀释冲浪、过小无收益；8 曾使 testbed 88.9→86.5）
+    private static final double CROWD_PEAK_SCALE = 3.5;
+    private static int crowdUpdates;
+
     private final AdvancedRobot robot;
     private final Rectangle2D.Double field;
     private final double fieldW;
@@ -100,6 +121,7 @@ final class Surfing {
     private double enemyGunHeat = 3.0;
     private long heatRefTime;
     private double lastEnemyPower = 1.9;
+    private double enemyEnergy = 100;
     private EnemyWave pendingImaginary;
 
     static final class EnemyWave {
@@ -112,7 +134,14 @@ final class Surfing {
         double distanceTraveled;
         boolean imaginary;  // gunheat 预测波：还没真开火，仅用于提前冲浪
         double[] features;  // 开火时局面特征（KNN 查询键）
-        double[] stats;     // 缓存的危险 bin（由 KNN 近邻生成，SURF_DATA 变更后作废）
+        double[] stats;     // 缓存的危险 bin（KNN+crowd 融合，变更后作废）
+        // Crowd surfing：开火时我方运动状态 → 简单枪预测 GF
+        Point2D.Double myPos;
+        double myHeading;
+        double myVelocity;
+        double myOmega;     // 每 tick 转向量（圆形预测）
+        double predLinGf;
+        double predCircGf;
         final List<Shadow> shadows = new ArrayList<Shadow>();
     }
 
@@ -131,12 +160,15 @@ final class Surfing {
         final double gfHigh;
         final long crossTime;
         final Object bullet;
+        /** 1.0 = 同 tick 精确对撞；0.5 = BeepBoop t±1 重叠阴影。 */
+        final double weight;
 
-        Shadow(double gfLow, double gfHigh, long crossTime, Object bullet) {
+        Shadow(double gfLow, double gfHigh, long crossTime, Object bullet, double weight) {
             this.gfLow = gfLow;
             this.gfHigh = gfHigh;
             this.crossTime = crossTime;
             this.bullet = bullet;
+            this.weight = weight;
         }
     }
 
@@ -156,16 +188,47 @@ final class Surfing {
     private static final class OptionEval {
         WaveWindow first;               // 第一波窗口
         WaveWindow[] second;            // 该选项终点对应第二波的三个选项窗口（可为 null）
+        WaveWindow[] third;             // 从最优第二波终点出发的第三波三选项（可为 null）
     }
 
     private final OptionEval[] lastEvals = new OptionEval[3];
+    private OptionEval chosenEval; // 本 tick 实际执行的方案（True 或 Path），主动阴影用
     private long lastEvalTime = -1;
     // 当前最优走位方案在各波上的预测被扫位置（helpful shadow GF 用）
     private EnemyWave targetWave1;
     private Point2D.Double targetEnd1;
     private EnemyWave targetWave2;
     private Point2D.Double targetEnd2;
+    private EnemyWave targetWave3;
+    private Point2D.Double targetEnd3;
     private static int activeShadowShots; // 诊断：主动阴影改变开火角的次数
+    private static int pathWins;         // 诊断：Path/GoTo 方案击败 True 三选项的次数
+    private static int thirdWaveEvals;   // 诊断：附带第三波评估的次数
+
+    /** Path surfing 候选：两阶段 True 或 GoTo 目标点。 */
+    private static final class PathSpec {
+        final int opt1;
+        final int ticks1;          // GoTo 时忽略
+        final int opt2;
+        final Point2D.Double gotoTarget; // non-null = GoTo 模式
+        final int firstOption;     // 本 tick 执行的 True 选项（GoTo 时用方向提示）
+
+        static PathSpec twoPhase(int opt1, int ticks1, int opt2) {
+            return new PathSpec(opt1, ticks1, opt2, null, opt1);
+        }
+
+        static PathSpec goTo(Point2D.Double target, int preferDir) {
+            return new PathSpec(preferDir, 0, preferDir, target, preferDir);
+        }
+
+        private PathSpec(int opt1, int ticks1, int opt2, Point2D.Double gotoTarget, int firstOption) {
+            this.opt1 = opt1;
+            this.ticks1 = ticks1;
+            this.opt2 = opt2;
+            this.gotoTarget = gotoTarget;
+            this.firstOption = firstOption;
+        }
+    }
 
     /** 精确预测用的自身运动状态。 */
     private static final class MoveState {
@@ -200,6 +263,7 @@ final class Surfing {
     }
 
     static String surfStats() {
+        double[] w = softmaxWeights();
         return "shadowPieces=" + shadowPieces + " gunheatWaves=" + gunheatWaves
                 + " activeShadowShots=" + activeShadowShots
                 + " flattenVisits=" + flattenVisits
@@ -208,7 +272,12 @@ final class Surfing {
                 PowerSelector.ENEMY.rawHitRate())
                 + " enemyHRroll=" + String.format(java.util.Locale.US, "%.3f",
                 rollingEnemyHitRate())
-                + " surfKnn=" + SURF_DATA.size();
+                + " surfKnn=" + SURF_DATA.size()
+                + " crowdUpd=" + crowdUpdates
+                + String.format(java.util.Locale.US,
+                " crowdW=%.2f/%.2f/%.2f/%.2f", w[0], w[1], w[2], w[3])
+                + " pathWins=" + pathWins
+                + " thirdWave=" + thirdWaveEvals;
     }
 
     /** 敌人最近一次开火功率（未观测到开火时为默认 1.9），PowerSelector 建模用。 */
@@ -220,6 +289,7 @@ final class Surfing {
 
     /** 每个扫描 tick 调用：检测到开火则建波，然后推进波并执行冲浪。 */
     void onScan(Snapshot cur, Snapshot prev, double firedPower, double enemyEnergy) {
+        this.enemyEnergy = enemyEnergy;
         if (cur.myLateralDirection != trackedLatDir) {
             trackedLatDir = cur.myLateralDirection;
             lastDirChangeTime = cur.time;
@@ -233,6 +303,7 @@ final class Surfing {
             w.directAngle = prev.absBearingEnemyToMe;
             w.direction = prev.myLateralDirection;
             w.features = surfFeatures(prev, firedPower, cur.time - 1);
+            fillCrowdState(w, prev, lastOmega);
             waves.add(w);
             for (MyBullet b : myBullets) {
                 computeShadows(b, w);
@@ -246,13 +317,18 @@ final class Surfing {
             enemyGunHeat = 1 + firedPower / 5 - coolingRate; // 已冷却到 cur.time
             heatRefTime = cur.time;
         }
-        updateGunheatWave(cur, enemyEnergy);
+        double omegaNow = hasMyHeading
+                ? Utils.normalRelativeAngle(cur.myHeading - lastMyHeading) : 0;
+        updateGunheatWave(cur, enemyEnergy, omegaNow);
         updateWaves(cur);
         surf(cur);
         // 速度历史：本 tick 结束后供下一发波的加速度特征
         speedT2 = speedT1;
         speedT1 = Math.hypot(cur.myLateralVelocity, cur.myAdvancingVelocity);
         hasSpeedHist = true;
+        lastOmega = omegaNow;
+        lastMyHeading = cur.myHeading;
+        hasMyHeading = true;
     }
 
     /**
@@ -260,7 +336,7 @@ final class Surfing {
      * 消掉「开火检测滞后 1 tick + 反应 1 tick」的裸奔窗口。真波到达即替换；对手憋枪
      * 超过预计 2 tick 就撤销重建（跟着它的新位置走）。
      */
-    private void updateGunheatWave(Snapshot cur, double enemyEnergy) {
+    private void updateGunheatWave(Snapshot cur, double enemyEnergy, double omegaNow) {
         if (pendingImaginary != null && cur.time > pendingImaginary.fireTime + 2) {
             waves.remove(pendingImaginary);
             pendingImaginary = null;
@@ -277,6 +353,7 @@ final class Surfing {
             w.directAngle = cur.absBearingEnemyToMe;
             w.direction = cur.myLateralDirection;
             w.features = surfFeatures(cur, pEst, cur.time);
+            fillCrowdState(w, cur, omegaNow);
             w.imaginary = true;
             waves.add(w);
             pendingImaginary = w;
@@ -413,7 +490,7 @@ final class Surfing {
     }
 
     /** 按波特征查 KNN，生成危险 bin（含 GF0 播种，零数据时仍躲 head-on）。 */
-    private static double[] buildDangerBins(double[] features) {
+    private static double[] buildKnnBins(double[] features) {
         double[] bins = new double[BINS];
         for (int x = 0; x < BINS; x++) {
             bins[x] = 0.1 / ((x - MID) * (x - MID) + 1);
@@ -433,9 +510,108 @@ final class Surfing {
         return bins;
     }
 
+    /**
+     * Crowd surfing 融合危险：完整 KNN 密度 + 按 softmax 权重叠加的
+     * HOT(GF0) / 线性 / 圆形 自模拟峰。KNN 不参与稀释，只作简单枪相对加权基准。
+     */
+    private static double[] buildDangerBins(EnemyWave w) {
+        double[] bins = buildKnnBins(w.features);
+        double[] weights = softmaxWeights();
+        addCrowdPeak(bins, 0.0, weights[MODEL_HOT] * CROWD_PEAK_SCALE);
+        addCrowdPeak(bins, w.predLinGf, weights[MODEL_LIN] * CROWD_PEAK_SCALE);
+        addCrowdPeak(bins, w.predCircGf, weights[MODEL_CIRC] * CROWD_PEAK_SCALE);
+        return bins;
+    }
+
+    private static void addCrowdPeak(double[] bins, double gf, double scale) {
+        if (scale <= 1e-9) {
+            return;
+        }
+        int index = (int) RcMath.limit(0, gf * MID + MID, BINS - 1);
+        for (int x = 0; x < BINS; x++) {
+            bins[x] += scale / ((x - index) * (x - index) + 1);
+        }
+    }
+
+    private static double[] softmaxWeights() {
+        double max = MODEL_SCORE[0];
+        for (int i = 1; i < MODEL_COUNT; i++) {
+            max = Math.max(max, MODEL_SCORE[i]);
+        }
+        double sum = 0;
+        double[] w = new double[MODEL_COUNT];
+        for (int i = 0; i < MODEL_COUNT; i++) {
+            w[i] = Math.exp(MODEL_SCORE[i] - max);
+            sum += w[i];
+        }
+        for (int i = 0; i < MODEL_COUNT; i++) {
+            w[i] /= sum;
+        }
+        return w;
+    }
+
+    /** 用观测到的开火 GF 更新各危险模型权重（命中/对撞）。 */
+    private static void noteCrowdObservation(EnemyWave w, double actualGf) {
+        double knnGf = peakGf(buildKnnBins(w.features));
+        double[] preds = {knnGf, 0.0, w.predLinGf, w.predCircGf};
+        for (int m = 0; m < MODEL_COUNT; m++) {
+            double err = preds[m] - actualGf;
+            double match = Math.exp(-0.5 * (err / MODEL_MATCH_SIGMA) * (err / MODEL_MATCH_SIGMA));
+            MODEL_SCORE[m] = MODEL_SCORE[m] * MODEL_SCORE_DECAY + match;
+        }
+        crowdUpdates++;
+        // 权重变了，作废缓存（由调用方接着 logHit→invalidate）
+    }
+
+    private static double peakGf(double[] bins) {
+        int best = MID;
+        double bestV = bins[MID];
+        for (int i = 0; i < BINS; i++) {
+            if (bins[i] > bestV) {
+                bestV = bins[i];
+                best = i;
+            }
+        }
+        return (best - MID) / (double) MID;
+    }
+
+    /** 写入开火时我方状态，并预计算线性/圆形枪会打的 GF。 */
+    private void fillCrowdState(EnemyWave w, Snapshot snap, double omega) {
+        w.myPos = snap.myLocation;
+        w.myHeading = snap.myHeading;
+        w.myVelocity = snap.myVelocity;
+        w.myOmega = omega;
+        w.predLinGf = simpleGunGf(w, false);
+        w.predCircGf = simpleGunGf(w, true);
+    }
+
+    /**
+     * 从敌人视角的线性/圆形瞄准：迭代求「子弹飞行时间内我滑行到的位置」，
+     * 再换成相对 directAngle 的 GF。circular=true 时每 tick 叠加 myOmega。
+     */
+    private double simpleGunGf(EnemyWave w, boolean circular) {
+        Point2D.Double p = new Point2D.Double(w.myPos.x, w.myPos.y);
+        double h = w.myHeading;
+        double[] vel = {w.myVelocity};
+        int ticks = 0;
+        while (ticks < 110) {
+            ticks++;
+            if (circular) {
+                h += w.myOmega;
+            }
+            p = RcMath.coastStep(p, h, vel, field);
+            if (ticks * w.speed >= w.origin.distance(p)) {
+                break;
+            }
+        }
+        double offset = Utils.normalRelativeAngle(
+                RcMath.absoluteBearing(w.origin, p) - w.directAngle);
+        return RcMath.limit(-1, offset / RcMath.maxEscapeAngle(w.speed) * w.direction, 1);
+    }
+
     private static void ensureStats(EnemyWave w) {
         if (w != null && w.stats == null) {
-            w.stats = buildDangerBins(w.features);
+            w.stats = buildDangerBins(w);
         }
     }
 
@@ -533,6 +709,8 @@ final class Surfing {
             noteEnemyShotForFlattener(true);
         }
         if (match != null) {
+            // Crowd 权重：命中与子弹对撞都更新（对撞无走位选择偏差，BeepBoop 偏好）
+            noteCrowdObservation(match, factorGf(match, hitLocation));
             logHit(match, hitLocation);
             waves.remove(match);
         }
@@ -582,7 +760,8 @@ final class Surfing {
         List<double[]> pieces = shadowIntervals(w, b.origin, b.angle, b.speed, b.fireTime,
                 fieldW, fieldH);
         for (double[] p : pieces) {
-            w.shadows.add(new Shadow(p[0], p[1], (long) p[2], b));
+            double weight = p.length > 3 ? p[3] : 1.0;
+            w.shadows.add(new Shadow(p[0], p[1], (long) p[2], b, weight));
             shadowPieces++;
         }
     }
@@ -593,9 +772,10 @@ final class Surfing {
      * tick U 上，敌方位于波上角度 φ 的子弹段 = 波源沿 φ 的 [r(U-1), r(U)] 径向段，
      * 我方子弹段 = 弦 [p(U-1), p(U)]。两段相交 ⟺ 弦上存在点落在环带 [r(U-1), r(U)] 内
      * 且方位为 φ。所以「弦 ∩ 环带」每个连通片的方位角范围就是该 tick 挡出的阴影。
-     * 弦被内圆截断时可能有两个连通片，逐片输出。子弹出界（撞墙死亡）即停止。
+     * 另按 BeepBoop：对 (bullet_t, wave_{t−1}) 与 (bullet_{t−1}, wave_t) 各加 50% 权阴影
+     * （引擎按随机顺序判弹撞，邻 tick 线段也可能相交）。
      *
-     * @return 每片 {gfLow, gfHigh, crossTick}
+     * @return 每片 {gfLow, gfHigh, crossTick, weight}
      */
     static List<double[]> shadowIntervals(EnemyWave w, Point2D.Double bOrigin, double bAngle,
                                           double bSpeed, long bFireTime, double fieldW, double fieldH) {
@@ -609,7 +789,20 @@ final class Surfing {
             double rOuter = (u - w.fireTime) * w.speed;
             if (rOuter > 0) {
                 double rInner = Math.max(0, rOuter - w.speed);
-                collectChordAnnulusPieces(out, w, mea, p1, p2, rInner, rOuter, u);
+                // 同 tick 精确阴影（权 1）
+                collectChordAnnulusPieces(out, w, mea, p1, p2, rInner, rOuter, u, 1.0);
+                // 50%：(bullet_t, wave_{t-1})
+                double rOuterPrev = rInner;
+                if (rOuterPrev > 0) {
+                    double rInnerPrev = Math.max(0, rOuterPrev - w.speed);
+                    collectChordAnnulusPieces(out, w, mea, p1, p2, rInnerPrev, rOuterPrev, u, 0.5);
+                }
+                // 50%：(bullet_{t-1}, wave_t)
+                if (u - 1 > bFireTime) {
+                    Point2D.Double p0 = RcMath.project(bOrigin, bAngle,
+                            (u - 2 - bFireTime) * bSpeed);
+                    collectChordAnnulusPieces(out, w, mea, p0, p1, rInner, rOuter, u, 0.5);
+                }
             }
             if (p2.x < 0 || p2.x > fieldW || p2.y < 0 || p2.y > fieldH) {
                 break; // 子弹本 tick 出界死亡，之后不再产生阴影
@@ -621,7 +814,8 @@ final class Surfing {
     /** 弦 [p1,p2] 与环带 [rInner,rOuter]（圆心 = 波源）各连通片的 GF 区间加入 out。 */
     private static void collectChordAnnulusPieces(List<double[]> out, EnemyWave w, double mea,
                                                   Point2D.Double p1, Point2D.Double p2,
-                                                  double rInner, double rOuter, long crossTick) {
+                                                  double rInner, double rOuter, long crossTick,
+                                                  double weight) {
         double dx = p2.x - p1.x, dy = p2.y - p1.y;
         double fx = p1.x - w.origin.x, fy = p1.y - w.origin.y;
         double a = dx * dx + dy * dy;
@@ -682,23 +876,28 @@ final class Surfing {
             double gfB = RcMath.limit(-1, offB / mea * w.direction, 1);
             double lo = Math.min(gfA, gfB), hi = Math.max(gfA, gfB);
             if (hi - lo > 1e-9) {
-                out.add(new double[]{lo, hi, crossTick});
+                out.add(new double[]{lo, hi, crossTick, weight});
             }
         }
     }
 
-    /** [lo,hi] GF 区间被「该波阴影 ∪ extra 假想阴影」并集覆盖的比例。 */
+    /**
+     * [lo,hi] GF 区间被阴影加权覆盖的平均比例（每点权重累加后钳到 1）。
+     * extra 片格式 {gfLow, gfHigh, ..., weight?}，缺省 weight=1。
+     */
     private static double shadowedFraction(EnemyWave w, double lo, double hi,
                                            List<double[]> extra) {
         if ((w.shadows.isEmpty() && (extra == null || extra.isEmpty())) || hi - lo < 1e-12) {
             return 0;
         }
-        List<double[]> xs = new ArrayList<double[]>();
+        // 扫描线事件 {pos, +weight / -weight}
+        List<double[]> ev = new ArrayList<double[]>();
         for (Shadow s : w.shadows) {
             double a = Math.max(lo, s.gfLow);
             double b = Math.min(hi, s.gfHigh);
             if (b > a) {
-                xs.add(new double[]{a, b});
+                ev.add(new double[]{a, s.weight});
+                ev.add(new double[]{b, -s.weight});
             }
         }
         if (extra != null) {
@@ -706,31 +905,33 @@ final class Surfing {
                 double a = Math.max(lo, s[0]);
                 double b = Math.min(hi, s[1]);
                 if (b > a) {
-                    xs.add(new double[]{a, b});
+                    double wt = s.length > 3 ? s[3] : 1.0;
+                    ev.add(new double[]{a, wt});
+                    ev.add(new double[]{b, -wt});
                 }
             }
         }
-        if (xs.isEmpty()) {
+        if (ev.isEmpty()) {
             return 0;
         }
-        Collections.sort(xs, new Comparator<double[]>() {
+        Collections.sort(ev, new Comparator<double[]>() {
             @Override
             public int compare(double[] x, double[] y) {
-                return Double.compare(x[0], y[0]);
+                int c = Double.compare(x[0], y[0]);
+                return c != 0 ? c : Double.compare(x[1], y[1]);
             }
         });
-        double covered = 0, curLo = xs.get(0)[0], curHi = xs.get(0)[1];
-        for (int i = 1; i < xs.size(); i++) {
-            double[] iv = xs.get(i);
-            if (iv[0] <= curHi) {
-                curHi = Math.max(curHi, iv[1]);
-            } else {
-                covered += curHi - curLo;
-                curLo = iv[0];
-                curHi = iv[1];
+        double covered = 0, curW = 0, prev = lo;
+        for (double[] e : ev) {
+            if (e[0] > prev) {
+                covered += (e[0] - prev) * Math.min(1, curW);
+                prev = e[0];
             }
+            curW += e[1];
         }
-        covered += curHi - curLo;
+        if (hi > prev) {
+            covered += (hi - prev) * Math.min(1, curW);
+        }
         return Math.min(1, covered / (hi - lo));
     }
 
@@ -833,11 +1034,19 @@ final class Surfing {
      *   (覆盖质量 × 子弹伤害 + ε) × 俯冲因子 + 撞墙伤害
      * ε 让「零窗口完全躲开」的选项之间仍按距离分优劣——精确交点下俯冲保护必须这样做，
      * 否则一个贴脸但恰好躲开本波的选项会拿到干净的 0 分、下一波直接送命。
-     * extra1/extra2 为对应波上的假想阴影（主动阴影评估用，平时传 null）。
+     * extra1/2/3 为对应波上的假想阴影（主动阴影评估用，平时传 null）。
      */
     private double windowDanger(WaveWindow ww, EnemyWave wave1, List<double[]> extra1,
-                                EnemyWave wave2, List<double[]> extra2) {
-        List<double[]> extra = ww.wave == wave1 ? extra1 : ww.wave == wave2 ? extra2 : null;
+                                EnemyWave wave2, List<double[]> extra2,
+                                EnemyWave wave3, List<double[]> extra3) {
+        List<double[]> extra = null;
+        if (ww.wave == wave1) {
+            extra = extra1;
+        } else if (ww.wave == wave2) {
+            extra = extra2;
+        } else if (ww.wave == wave3) {
+            extra = extra3;
+        }
         double mass = ww.minOff <= ww.maxOff
                 ? intervalMass(ww.wave, ww.minOff, ww.maxOff, extra) : 0;
         return (mass * bulletDamage(ww.wave.power) + DANGER_EPSILON) * ww.dive + ww.wallDamage;
@@ -945,8 +1154,15 @@ final class Surfing {
     private void surf(Snapshot cur) {
         EnemyWave w1 = closestSurfableWave(cur.myLocation, cur.time);
         lastEvalTime = cur.time;
-        targetWave1 = targetWave2 = null;
-        targetEnd1 = targetEnd2 = null;
+        targetWave1 = targetWave2 = targetWave3 = null;
+        targetEnd1 = targetEnd2 = targetEnd3 = null;
+        chosenEval = null;
+        // 残废且无来弹：直冲撞击刷分（有在途敌波时仍优先躲）
+        if (w1 == null && PowerSelector.shouldRam(enemyEnergy)) {
+            lastEvals[0] = lastEvals[1] = lastEvals[2] = null;
+            setBackAsFront(RcMath.absoluteBearing(cur.myLocation, cur.enemyLocation), 100);
+            return;
+        }
         if (w1 == null) {
             lastEvals[0] = lastEvals[1] = lastEvals[2] = null;
             idle(cur);
@@ -956,41 +1172,55 @@ final class Surfing {
                 robot.getHeadingRadians(), robot.getVelocity(), cur.time);
         Point2D.Double enemy = cur.enemyLocation;
 
-        // 平局时偏向保持当前方向，避免无谓抖动。三个选项全量评估（不剪枝），
-        // 缓存窗口供主动阴影做「假想开火后的危险」重算
+        // 1) True 三选项（基线 + lastEvals 供「最小可达危险」）
         int[] order = {lastSurfDirection, 0, -lastSurfDirection};
         double bestDanger = Double.POSITIVE_INFINITY;
         int bestOption = lastSurfDirection;
         int bestIdx = 0;
+        PathSpec bestPath = null;
         for (int oi = 0; oi < 3; oi++) {
-            int option = order[oi];
-            Prediction p1 = predictOption(now, w1, option, enemy);
-            OptionEval ev = new OptionEval();
-            ev.first = p1.window;
-            EnemyWave w2 = closestSurfableWave(p1.end.pos, p1.end.time);
-            if (w2 != null && w2 != w1) {
-                ev.second = new WaveWindow[3];
-                for (int oj = 0; oj < 3; oj++) {
-                    ev.second[oj] = predictOption(p1.end, w2, order[oj], enemy).window;
-                }
-            }
+            OptionEval ev = evaluateTrueOption(now, w1, order[oi], enemy, order);
             lastEvals[oi] = ev;
-            double total = optionTotal(ev, null, null);
+            double total = optionTotal(ev, null, null, null);
             if (total < bestDanger) {
                 bestDanger = total;
-                bestOption = option;
+                bestOption = order[oi];
                 bestIdx = oi;
             }
         }
 
+        // 2) Path/GoTo：ETA 足够时评估两阶段路径 + 轨道目标点（BeepBoop 轻量版）
+        double remaining = w1.origin.distance(cur.myLocation)
+                - (cur.time - w1.fireTime) * w1.speed;
+        double eta = remaining / w1.speed;
+        if (eta >= 6) {
+            for (PathSpec spec : buildPathSpecs(w1, cur, eta)) {
+                OptionEval ev = evaluatePath(now, w1, enemy, order, spec);
+                double total = optionTotal(ev, null, null, null);
+                // 需明显更好才换 Path，抑制无谓抖动
+                if (total < bestDanger - 0.02) {
+                    bestDanger = total;
+                    bestOption = spec.firstOption;
+                    bestPath = spec;
+                    bestIdx = -1;
+                    chosenEval = ev;
+                }
+            }
+        }
+        if (chosenEval == null) {
+            chosenEval = lastEvals[bestIdx];
+        } else {
+            pathWins++;
+        }
+
         // 记录当前方案在各波上的预测被扫位置（helpful shadow 拦截点）
-        OptionEval chosen = lastEvals[bestIdx];
+        OptionEval chosen = chosenEval;
         targetWave1 = w1;
         targetEnd1 = chosen.first.crossPos;
         if (chosen.second != null) {
             double b2 = Double.POSITIVE_INFINITY;
             for (WaveWindow sw : chosen.second) {
-                double d = windowDanger(sw, null, null, null, null);
+                double d = windowDanger(sw, null, null, null, null, null, null);
                 if (d < b2) {
                     b2 = d;
                     targetWave2 = sw.wave;
@@ -998,8 +1228,25 @@ final class Surfing {
                 }
             }
         }
+        if (chosen.third != null) {
+            double b3 = Double.POSITIVE_INFINITY;
+            for (WaveWindow sw : chosen.third) {
+                double d = windowDanger(sw, null, null, null, null, null, null);
+                if (d < b3) {
+                    b3 = d;
+                    targetWave3 = sw.wave;
+                    targetEnd3 = sw.crossPos;
+                }
+            }
+        }
 
-        if (bestOption == 0) {
+        // 执行：GoTo 朝目标点；否则 True orbit
+        if (bestPath != null && bestPath.gotoTarget != null) {
+            if (bestPath.firstOption != 0) {
+                lastSurfDirection = bestPath.firstOption;
+            }
+            setBackAsFront(RcMath.absoluteBearing(cur.myLocation, bestPath.gotoTarget), 100);
+        } else if (bestOption == 0) {
             double turn = Utils.normalRelativeAngle(
                     orbitAngle(w1.origin, cur.myLocation, enemy, lastSurfDirection)
                             - robot.getHeadingRadians());
@@ -1014,17 +1261,223 @@ final class Surfing {
         }
     }
 
-    /** 三选项冲浪总分（带可选假想阴影）：D1 + 0.5 × min D2。 */
-    private double optionTotal(OptionEval ev, List<double[]> extra1, List<double[]> extra2) {
+    private OptionEval evaluateTrueOption(MoveState now, EnemyWave w1, int option,
+                                          Point2D.Double enemy, int[] order) {
+        Prediction p1 = predictOption(now, w1, option, enemy);
+        OptionEval ev = new OptionEval();
+        ev.first = p1.window;
+        attachFollowWaves(ev, p1.end, w1, enemy, order, true);
+        return ev;
+    }
+
+    private OptionEval evaluatePath(MoveState now, EnemyWave w1, Point2D.Double enemy,
+                                    int[] order, PathSpec spec) {
+        Prediction p1 = spec.gotoTarget != null
+                ? predictGoto(now, w1, spec.gotoTarget, enemy)
+                : predictTwoPhase(now, w1, spec.opt1, spec.ticks1, spec.opt2, enemy);
+        OptionEval ev = new OptionEval();
+        ev.first = p1.window;
+        // Path 分支第三波只评最优第二波方向的单续航，控制 CPU
+        attachFollowWaves(ev, p1.end, w1, enemy, order, false);
+        return ev;
+    }
+
+    /**
+     * 第二波：三选项精确预测。第三波：从危险最低的第二波终点继续——
+     * fullThird=true 时再开三选项；否则只沿最优第二波方向单步续航（Path 用，省 CPU）。
+     */
+    private void attachFollowWaves(OptionEval ev, MoveState end, EnemyWave w1,
+                                   Point2D.Double enemy, int[] order, boolean fullThird) {
+        EnemyWave w2 = closestSurfableWave(end.pos, end.time);
+        if (w2 == null || w2 == w1) {
+            return;
+        }
+        ev.second = new WaveWindow[3];
+        Prediction[] p2 = new Prediction[3];
+        double best2 = Double.POSITIVE_INFINITY;
+        int best2i = 0;
+        for (int oj = 0; oj < 3; oj++) {
+            p2[oj] = predictOption(end, w2, order[oj], enemy);
+            ev.second[oj] = p2[oj].window;
+            double d = windowDanger(ev.second[oj], null, null, null, null, null, null);
+            if (d < best2) {
+                best2 = d;
+                best2i = oj;
+            }
+        }
+        EnemyWave w3 = closestSurfableWave(p2[best2i].end.pos, p2[best2i].end.time);
+        if (w3 == null || w3 == w1 || w3 == w2) {
+            return;
+        }
+        thirdWaveEvals++;
+        if (fullThird) {
+            ev.third = new WaveWindow[3];
+            for (int ok = 0; ok < 3; ok++) {
+                ev.third[ok] = predictOption(p2[best2i].end, w3, order[ok], enemy).window;
+            }
+        } else {
+            // Path：单续航近似第三波（权重本就低，精度够用）
+            ev.third = new WaveWindow[]{
+                    predictOption(p2[best2i].end, w3, order[best2i], enemy).window};
+        }
+    }
+
+    /** 两阶段 / GoTo 候选（控制数量，避免 skipped turns）。 */
+    private List<PathSpec> buildPathSpecs(EnemyWave w1, Snapshot cur, double eta) {
+        List<PathSpec> specs = new ArrayList<PathSpec>();
+        int dir = lastSurfDirection;
+        int half = Math.max(2, (int) (eta * 0.45));
+        int third = Math.max(2, (int) (eta / 3));
+        // 两阶段 True：先冲后停 / 先停后冲 / 冲一段再反向
+        specs.add(PathSpec.twoPhase(dir, half, 0));
+        specs.add(PathSpec.twoPhase(0, Math.min(4, third), dir));
+        specs.add(PathSpec.twoPhase(dir, third, -dir));
+        specs.add(PathSpec.twoPhase(-dir, third, dir));
+        // GoTo：沿波圆轨道采样低危候选点（不同 lean / 距离）
+        double base = RcMath.absoluteBearing(w1.origin, cur.myLocation);
+        double dist = cur.myLocation.distance(w1.origin);
+        double[] leans = {-0.3, 0.05, 0.3};
+        double[] dists = {
+                RcMath.limit(120, dist, 500),
+                RcMath.limit(120, DESIRED_DISTANCE, 500)};
+        for (int d : new int[]{dir, -dir}) {
+            for (double lean : leans) {
+                for (double rd : dists) {
+                    double ang = base + d * (Math.PI / 2 + lean);
+                    Point2D.Double t = RcMath.project(w1.origin, ang, rd);
+                    if (field.contains(t) && t.distance(cur.myLocation) > 40) {
+                        specs.add(PathSpec.goTo(t, d));
+                    }
+                }
+            }
+        }
+        // 上限：控制 CPU（True 3 + Path≤10 ≈ 二波评估可接受）
+        if (specs.size() > 10) {
+            return new ArrayList<PathSpec>(specs.subList(0, 10));
+        }
+        return specs;
+    }
+
+    /** 先 opt1 走 ticks1 步，再改 opt2，直到波越过。 */
+    private Prediction predictTwoPhase(MoveState start, EnemyWave w, int opt1, int ticks1,
+                                       int opt2, Point2D.Double enemy) {
+        MoveState s = start.copy();
+        WaveWindow ww = new WaveWindow();
+        ww.wave = w;
+        int tick = 0;
+        int guard = 0;
+        while (guard++ < 400) {
+            double rNow = (s.time - w.fireTime) * w.speed;
+            double dist = s.pos.distance(w.origin);
+            if (rNow > dist + HALF_DIAGONAL) {
+                break;
+            }
+            if (rNow + w.speed >= dist - HALF_DIAGONAL) {
+                if (ww.crossPos == null) {
+                    ww.crossPos = new Point2D.Double(s.pos.x, s.pos.y);
+                }
+                double[] iv = annulusSquareOffsets(w, Math.max(0, rNow), rNow + w.speed, s.pos);
+                if (iv != null) {
+                    ww.minOff = Math.min(ww.minOff, iv[0]);
+                    ww.maxOff = Math.max(ww.maxOff, iv[1]);
+                }
+            }
+            int option = tick < ticks1 ? opt1 : opt2;
+            ww.wallDamage += step(s, w, option, enemy);
+            tick++;
+        }
+        return finishPrediction(s, ww, enemy);
+    }
+
+    /** 朝目标点行驶直到波越过（GoTo Surfing）。 */
+    private Prediction predictGoto(MoveState start, EnemyWave w, Point2D.Double target,
+                                   Point2D.Double enemy) {
+        MoveState s = start.copy();
+        WaveWindow ww = new WaveWindow();
+        ww.wave = w;
+        int guard = 0;
+        while (guard++ < 400) {
+            double rNow = (s.time - w.fireTime) * w.speed;
+            double dist = s.pos.distance(w.origin);
+            if (rNow > dist + HALF_DIAGONAL) {
+                break;
+            }
+            if (rNow + w.speed >= dist - HALF_DIAGONAL) {
+                if (ww.crossPos == null) {
+                    ww.crossPos = new Point2D.Double(s.pos.x, s.pos.y);
+                }
+                double[] iv = annulusSquareOffsets(w, Math.max(0, rNow), rNow + w.speed, s.pos);
+                if (iv != null) {
+                    ww.minOff = Math.min(ww.minOff, iv[0]);
+                    ww.maxOff = Math.max(ww.maxOff, iv[1]);
+                }
+            }
+            ww.wallDamage += stepToPoint(s, target);
+        }
+        return finishPrediction(s, ww, enemy);
+    }
+
+    private Prediction finishPrediction(MoveState s, WaveWindow ww, Point2D.Double enemy) {
+        Prediction p = new Prediction();
+        p.end = s;
+        if (ww.crossPos == null) {
+            ww.crossPos = new Point2D.Double(s.pos.x, s.pos.y);
+        }
+        ww.dive = RcMath.limit(1, DIVE_PROTECT_DISTANCE / s.pos.distance(enemy), 3);
+        p.window = ww;
+        return p;
+    }
+
+    /** 朝 target 行驶一步（GoTo 物理，与 setBackAsFront 一致）。 */
+    private double stepToPoint(MoveState s, Point2D.Double target) {
+        double maxTurning = Math.PI / 720d * (40d - 3d * Math.abs(s.velocity));
+        double goAngle = RcMath.absoluteBearing(s.pos, target);
+        double moveAngle = goAngle - s.heading;
+        double moveDir = 1;
+        if (Math.cos(moveAngle) < 0) {
+            moveAngle += Math.PI;
+            moveDir = -1;
+        }
+        moveAngle = Utils.normalRelativeAngle(moveAngle);
+        s.heading = Utils.normalRelativeAngle(
+                s.heading + RcMath.limit(-maxTurning, moveAngle, maxTurning));
+        s.velocity += s.velocity * moveDir < 0 ? 2 * moveDir : moveDir;
+        s.velocity = RcMath.limit(-8, s.velocity, 8);
+        s.pos = RcMath.project(s.pos, s.heading, s.velocity);
+        double wallDamage = 0;
+        if (!field.contains(s.pos)) {
+            s.pos = new Point2D.Double(
+                    RcMath.limit(field.x, s.pos.x, field.x + field.width),
+                    RcMath.limit(field.y, s.pos.y, field.y + field.height));
+            wallDamage = Math.max(0, Math.abs(s.velocity) * 0.5 - 1);
+            s.velocity = 0;
+        }
+        s.time++;
+        return wallDamage;
+    }
+
+    /** 冲浪总分（带可选假想阴影）：D1 + 0.5×min D2 + 0.25×min D3。 */
+    private double optionTotal(OptionEval ev, List<double[]> extra1, List<double[]> extra2,
+                               List<double[]> extra3) {
         EnemyWave wave1 = ev.first.wave;
         EnemyWave wave2 = ev.second != null && ev.second[0] != null ? ev.second[0].wave : null;
-        double total = windowDanger(ev.first, wave1, extra1, wave2, extra2);
+        EnemyWave wave3 = ev.third != null && ev.third[0] != null ? ev.third[0].wave : null;
+        double total = windowDanger(ev.first, wave1, extra1, wave2, extra2, wave3, extra3);
         if (ev.second != null) {
             double best2 = Double.POSITIVE_INFINITY;
             for (WaveWindow sw : ev.second) {
-                best2 = Math.min(best2, windowDanger(sw, wave1, extra1, wave2, extra2));
+                best2 = Math.min(best2,
+                        windowDanger(sw, wave1, extra1, wave2, extra2, wave3, extra3));
             }
             total += SECOND_WAVE_WEIGHT * best2;
+        }
+        if (ev.third != null) {
+            double best3 = Double.POSITIVE_INFINITY;
+            for (WaveWindow sw : ev.third) {
+                best3 = Math.min(best3,
+                        windowDanger(sw, wave1, extra1, wave2, extra2, wave3, extra3));
+            }
+            total += THIRD_WAVE_WEIGHT * best3;
         }
         return total;
     }
@@ -1032,38 +1485,42 @@ final class Surfing {
     // ===================== 主动子弹阴影（阶段 2.3） =====================
 
     /**
-     * 假想「本 tick 以 bulletSpeed 沿 fireAngle 开火」后，当前走位方案的冲浪危险。
-     * 用缓存的三选项窗口 + 假想子弹在两个目标波上的阴影区间重算，取三选项最小值。
-     * 返回值口径与 surf() 的 danger 一致，仅用于候选开火角之间的相对比较。
+     * 假想「本 tick 以 bulletSpeed 沿 fireAngle 开火」后的冲浪危险。
+     * 优先用本 tick 实际选中的 Path/True 方案；并取 True 三选项最小可达作下限，
+     * 避免高估阴影价值（BeepBoop：当前方案危险 + 最小可达危险）。
      */
     double dangerAfterHypotheticalShot(Point2D.Double origin, double fireAngle,
                                        double bulletSpeed, long fireTime) {
-        if (lastEvalTime != fireTime || lastEvals[0] == null) {
-            return -1; // 本 tick 没有冲浪评估（无波），阴影无意义
+        if (lastEvalTime != fireTime || chosenEval == null) {
+            return -1;
         }
         List<double[]> extra1 = hypoShadow(targetWave1, origin, fireAngle, bulletSpeed, fireTime);
         List<double[]> extra2 = hypoShadow(targetWave2, origin, fireAngle, bulletSpeed, fireTime);
-        double best = Double.POSITIVE_INFINITY;
+        List<double[]> extra3 = hypoShadow(targetWave3, origin, fireAngle, bulletSpeed, fireTime);
+        double plan = optionTotal(chosenEval, extra1, extra2, extra3);
+        double minReach = plan;
         for (OptionEval ev : lastEvals) {
             if (ev != null) {
-                best = Math.min(best, optionTotal(ev, extra1, extra2));
+                minReach = Math.min(minReach, optionTotal(ev, extra1, extra2, extra3));
             }
         }
-        return best;
+        // 0.65×当前方案 + 0.35×最小可达：阴影既要护住正走路，也要打开更好选项
+        return 0.65 * plan + 0.35 * minReach;
     }
 
     /** 无假想开火时的基准危险（与 dangerAfterHypotheticalShot 同口径）。 */
     double currentPlanDanger(long time) {
-        if (lastEvalTime != time || lastEvals[0] == null) {
+        if (lastEvalTime != time || chosenEval == null) {
             return -1;
         }
-        double best = Double.POSITIVE_INFINITY;
+        double plan = optionTotal(chosenEval, null, null, null);
+        double minReach = plan;
         for (OptionEval ev : lastEvals) {
             if (ev != null) {
-                best = Math.min(best, optionTotal(ev, null, null));
+                minReach = Math.min(minReach, optionTotal(ev, null, null, null));
             }
         }
-        return best;
+        return 0.65 * plan + 0.35 * minReach;
     }
 
     private List<double[]> hypoShadow(EnemyWave w, Point2D.Double origin, double fireAngle,
@@ -1086,6 +1543,7 @@ final class Surfing {
         }
         addInterceptAngle(out, targetWave1, targetEnd1, gunPos, bulletSpeed, fireTime);
         addInterceptAngle(out, targetWave2, targetEnd2, gunPos, bulletSpeed, fireTime);
+        addInterceptAngle(out, targetWave3, targetEnd3, gunPos, bulletSpeed, fireTime);
         return out;
     }
 
@@ -1138,8 +1596,12 @@ final class Surfing {
         activeShadowShots++;
     }
 
-    /** 无波可冲（对手还没开火）：绕敌环绕并保持距离，偶尔换向。 */
+    /** 无波可冲（对手还没开火）：绕敌环绕并保持距离，偶尔换向；残废则撞击。 */
     private void idle(Snapshot cur) {
+        if (PowerSelector.shouldRam(enemyEnergy)) {
+            setBackAsFront(RcMath.absoluteBearing(cur.myLocation, cur.enemyLocation), 100);
+            return;
+        }
         if (Math.random() < 0.02) {
             idleDirection = -idleDirection;
         }

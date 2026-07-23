@@ -17,7 +17,9 @@ import torch
 
 DIMS = 8
 FEATURE_NAMES = ["bft", "|latV|", "advV", "accel", "dirTime", "wallF", "wallB", "power"]
-HAND_WEIGHTS = np.array([2, 4, 1, 2, 2, 2.5, 1, 1.5], dtype=np.float64)
+# 阶段 3.5：以当前线上权重为基线（2.5 学得结果）
+HAND_WEIGHTS = np.array(
+    [5.682, 1.268, 0.036, 0.769, 0.476, 1.242, 1.292, 0.760], dtype=np.float64)
 
 
 def load_battles(data_dir):

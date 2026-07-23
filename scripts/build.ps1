@@ -19,6 +19,7 @@ $outDir = Join-Path $root "out\classes"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $sources = Get-ChildItem -Path (Join-Path $root "src") -Recurse -Filter *.java |
+    Where-Object { $_.Name -notmatch 'Test\.java$' } |
     Select-Object -ExpandProperty FullName
 if (-not $sources) {
     Write-Error "src 目录下没有找到 .java 源文件。"
