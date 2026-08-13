@@ -402,6 +402,11 @@ final class Surfing {
         flatHead = (flatHead + 1) % FLATTENER_WINDOW;
     }
 
+    /** 滚动敌枪命中率（主动阴影 / flattener 门控共用）。 */
+    static double enemyRollingHitRate() {
+        return rollingEnemyHitRate();
+    }
+
     private static double rollingEnemyHitRate() {
         return flatCount == 0 ? 0 : flatHitCount / (double) flatCount;
     }

@@ -25,9 +25,9 @@ import torch
 
 DIMS = 8
 FEATURE_NAMES = ["bft", "|latV|", "advV", "accel", "dirTime", "wallF", "wallB", "disp8"]
-# 阶段 3.5：以当前线上权重为基线（原手工 {2,4,1,2,2,2.5,1,2} 的 2.1 学得结果）
+# 线上权重（3.5 rumble 全池导出）；leakbed 专用重训实战掉分已回退，勿覆盖
 HAND_WEIGHTS = np.array(
-    [5.001, 0.832, 2.843, 0.457, 1.532, 1.692, 0.824, 0.606], dtype=np.float64)
+    [5.290, 0.841, 2.623, 0.573, 1.096, 1.342, 0.980, 0.621], dtype=np.float64)
 
 
 def load_battles(data_dir):
@@ -122,9 +122,16 @@ def main():
     battles = load_battles(args.data)
     if not battles:
         sys.exit("no data in " + args.data)
-    # 每对手第 1 场训练、第 2 场验证
-    train = [b for b in battles if "-1.csv" in b[0]]
-    val = [b for b in battles if "-2.csv" in b[0]]
+    # 奇数场训练、偶数场验证（Battles≥2；Battles=4 时用满 1/3 vs 2/4）
+    def _battle_num(name):
+        import re
+        m = re.search(r"-(\d+)\.csv$", name)
+        return int(m.group(1)) if m else 0
+
+    train = [b for b in battles if _battle_num(b[0]) % 2 == 1]
+    val = [b for b in battles if _battle_num(b[0]) % 2 == 0]
+    if not train or not val:
+        sys.exit("need both odd (train) and even (val) battle files")
     n_train = sum(b[1].shape[0] for b in train)
     n_val = sum(b[1].shape[0] for b in val)
     print(f"battles: {len(train)} train ({n_train} waves) / {len(val)} val ({n_val} waves)")

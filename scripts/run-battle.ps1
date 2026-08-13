@@ -26,8 +26,13 @@ robot.description=KNN surfing + KNN dual gun + score-max power + active shadows 
 robocode.version=1.10.3
 robot.java.source.included=false
 "@ | Set-Content -Path $props -Encoding ASCII
-jar cf (Join-Path $RobocodeHome "robots\pc.Wavelet_dev.jar") -C (Join-Path $root "out\classes") pc
+# 先打到 out/ 再复制：roborumble 客户端常锁住 robots\*.jar，直接 jar cf 会失败
+$tmpJar = Join-Path $root "out\pc.Wavelet_dev.jar"
+$destJar = Join-Path $RobocodeHome "robots\pc.Wavelet_dev.jar"
+jar cf $tmpJar -C (Join-Path $root "out\classes") pc
 if ($LASTEXITCODE -ne 0) { Write-Error "jar packaging failed" }
+Copy-Item $tmpJar $destJar -Force
+if (-not (Test-Path $destJar)) { Write-Error "failed to deploy $destJar" }
 
 # Generate battle file
 $battleDir = Join-Path $root "battles"

@@ -127,6 +127,13 @@ final class PowerSelector {
      */
     static double choosePower(double myEnergy, double enemyEnergy, double distance,
                               double lastEnemyPower, int roundNum, double coolingRate) {
+        return choosePower(myEnergy, enemyEnergy, distance, lastEnemyPower, roundNum,
+                coolingRate, 0);
+    }
+
+    static double choosePower(double myEnergy, double enemyEnergy, double distance,
+                              double lastEnemyPower, int roundNum, double coolingRate,
+                              double advancingVelocity) {
         if (shouldRam(enemyEnergy)) {
             return -1; // 已 disable：子弹击杀不如撞击补分
         }
@@ -141,7 +148,9 @@ final class PowerSelector {
                 ? CANDIDATE_POWERS_ABS : CANDIDATE_POWERS;
 
         double bestPower;
-        if (distance < FULL_POWER_DISTANCE) {
+        // 贴身或高速冲撞：必中窗口，全功率（rammer/nano 漏分主要是伤害不够）
+        boolean ramClose = distance < 180 && advancingVelocity > 5.5;
+        if (distance < FULL_POWER_DISTANCE || ramClose) {
             bestPower = 2.95; // 这个距离基本必中，模型不用跑
         } else {
             bestPower = 0;
@@ -162,7 +171,7 @@ final class PowerSelector {
             bestPower = Math.min(bestPower, disablePower);
         }
         bestPower = Math.min(bestPower, myEnergy - MIN_ENERGY);
-        if (distance < FULL_POWER_DISTANCE) {
+        if (distance < FULL_POWER_DISTANCE || ramClose) {
             bestPower = Math.max(bestPower, 0.1);
         } else if (myEnergy < 5 && myEnergy > enemyEnergy) {
             // 低能量时不打让出能量领先的子弹（拖住等对手先垮）

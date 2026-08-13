@@ -169,6 +169,10 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
   - **机制**：增长期（未满容且样本数 >512）增量 kd-tree + 加权距离剪枝；满容环形淘汰后回退线性（覆盖会破坏空间不变量，全量重建曾导致 `skippedTurns` 飙升）。`KnnTest` 对照线性扫描通过。
   - **实测**：微基准 30k×8D 查询约 **2×** 快于线性；BasicGFSurfer 100 回合 `skippedTurns=0`。
   - **下一步**：已打包 **v1.2** 上传 rumble（见下方参赛备忘）。
+- **v1.3 近距枪 + 冷枪不线性拉（2026-08-12）**：
+  - 近距或敌方高速逼近：瞄准从 KNN 混向 HOT/线性，关掉主动阴影，打满功率（rammer/nano 存活高但 APS ~65% 是枪漏）。
+  - 主动阴影软门：敌滚动命中率低时抬瞄准门限、要求危险明显下降（硬关阴影在 Glacier 上有害）。
+  - 80 发后命中率仍 <16% 时关闭主枪线性 refine（冲浪者在躲匀速）。Samekh 本地 61→67；Gaff 护栏 67%；Komarious 76%。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
 
@@ -177,7 +181,7 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
 ### 本机已就绪
 
 - **评分客户端 1.9.4.2**：已解压到 `C:\robocode-1.9.4.2`（开发仍可用 `C:\robocode` 1.10.3）。
-- **打包脚本**：`.\scripts\package-upload.ps1 -Version 1.2 -RobocodeHome C:\robocode-1.9.4.2` → 产出 `dist\<classname>_1.2.jar`。
+- **打包脚本**：`.\scripts\package-upload.ps1 -Version 1.3 -RobocodeHome C:\robocode-1.9.4.2` → 产出 `dist\<classname>_1.3.jar`。
 - **改包名脚本**：`.\scripts\rename-package.ps1 -NewPackage <你的唯一包.类名>`（例 `pc.Wavelet`；**不能有下划线**，须全局唯一）。
 - 1.9.4.2 冒烟已通过（vs sample.Tracker）；强对手 JAR 已同步进该安装的 `robots/`。
 
@@ -185,14 +189,14 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
 
 1. ~~改包名~~ → **`pc.Wavelet`**（源码在 `src/pc/`）。
 2. ~~1.9.4.2 testbed~~ → 50 回合平均 **86.4%**（与 1.10.3 开发机一致）。
-3. ~~打包~~ → `dist/pc.Wavelet_1.2.jar`（已部署到 `C:\robocode-1.9.4.2\robots\`）。
+3. ~~打包~~ → `dist/pc.Wavelet_1.3.jar`（已部署到 `C:\robocode-1.9.4.2\robots\`）。
 4. ~~托管 JAR~~ → GitHub Release：  
-   https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.2/pc.Wavelet_1.2.jar
+   https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.3/pc.Wavelet_1.3.jar
 5. **RoboWiki Participants**（删掉旧版行，换成）：  
-   `pc.Wavelet 1.2,https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.2/pc.Wavelet_1.2.jar`
-6. 跑 rumble：`C:\robocode-1.9.4.2\roborumble\roborumble.bat`（`USER=JustinKong971013`；本机 `particip1v1.txt` 已临时指到 1.2）。
+   `pc.Wavelet 1.3,https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.3/pc.Wavelet_1.3.jar`
+6. 跑 rumble：`C:\robocode-1.9.4.2\roborumble\roborumble.bat`（`USER=JustinKong971013`；本机 `particip1v1.txt` 指到 1.3）。
 
-仓库：https://github.com/x1kong-ops/robocode-rumble · Release：https://github.com/x1kong-ops/robocode-rumble/releases/tag/v1.2
+仓库：https://github.com/x1kong-ops/robocode-rumble · Release：https://github.com/x1kong-ops/robocode-rumble/releases/tag/v1.3
 
 规则摘要：须有 package、JAR、同目录 `.properties`；命名与内部结构一致；Java 8–17 字节码均可（本项目 `--release 8`）。
 

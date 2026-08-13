@@ -28,12 +28,15 @@ final class KnnGun {
     // 阶段 2.1：离线梯度下降学得（ml/train_gun_weights.py，soft-KNN NLL），
     // 留出集硬 KNN 车身窗口命中率 0.322 -> 0.341（手工权重基线 {2,4,1,2,2,2.5,1,2}）
     // 阶段 3.5：rumble 全池重训（离线硬 KNN 相对线上基线 -0.4%，比例微调）
+    // 阶段 3.8 leakbed 重训试过并放弃：离线硬 KNN +0.5%，实战 Gaff/Komarious/Cigaret 均掉 3–4%
     private static final double[] WEIGHTS = {5.290, 0.841, 2.623, 0.573, 1.096, 1.342, 0.980, 0.621};
     private static final int DIMS = WEIGHTS.length;
 
     // 通用枪
     private static final int MAIN_K = 50;
     // anti-surfer 枪
+    // 漏分床实测：加快遗忘/更早切换（cap800–1500、hl120–200、margin0.02–0.03）
+    // 在 Gaff/Glacier 上 asFired↑ 或抖动↑，得分持平或下降——参数回退到原值。
     private static final int AS_K = 20;
     private static final int AS_CAPACITY = 2000;      // 小容量环形缓冲：物理上只留最近样本
     private static final double AS_HALF_LIFE = 300;   // 年龄半衰期（按插入条数，≈1/3 回合）
@@ -58,6 +61,7 @@ final class KnnGun {
     private static int myShots;
     private static int myHits;
     private static int preciseRefineUses; // 诊断：主枪精确预测改角次数
+    private static int ramAimShots;       // 诊断：近距/冲撞 HOT-线性混合开火次数
 
     private final AdvancedRobot robot;
     private final Surfing surfing; // 开火时通知铺 bullet shadow
@@ -101,9 +105,9 @@ final class KnnGun {
     static String gunStats() {
         double n = Math.max(1e-9, scoreNorm);
         return String.format(
-                "gunMain=%.3f gunAS=%.3f realWaves=%d asFired=%d hitRate=%.3f myShots=%d preciseRefine=%d",
+                "gunMain=%.3f gunAS=%.3f realWaves=%d asFired=%d hitRate=%.3f myShots=%d preciseRefine=%d ramAim=%d",
                 mainScore / n, asScore / n, realWaves, asFired, myHitRate(), myShots,
-                preciseRefineUses);
+                preciseRefineUses, ramAimShots);
     }
 
     /** Wavelet.onBulletHit 转发：我的子弹命中敌人。 */
@@ -144,7 +148,8 @@ final class KnnGun {
         breakWaves(enemyLocation, time);
 
         double rawPower = PowerSelector.choosePower(robot.getEnergy(), enemyEnergy, distance,
-                surfing.lastEnemyPower(), robot.getRoundNum(), robot.getGunCoolingRate());
+                surfing.lastEnemyPower(), robot.getRoundNum(), robot.getGunCoolingRate(),
+                advancingVelocity);
         boolean fireAllowed = rawPower >= 0.0995;
         double power = RcMath.limit(0.1, rawPower, 3.0);
         double bulletSpeed = RcMath.bulletSpeed(power);
@@ -182,7 +187,9 @@ final class KnnGun {
         double gf = useAs ? w.gfAs : w.gfMain;
 
         // 主枪：匀速滑行精确预测校验候选 GF（AS 枪对手会反应反应，不做线性假设）
-        if (!useAs && MAIN_DATA.size() > 0) {
+        // 命中率已经很低时对手在躲线性/匀速，再把瞄准往线性拉只会更偏（Samekh/Tigger）
+        if (!useAs && MAIN_DATA.size() > 0
+                && (myShots < 80 || myHitRate() >= 0.16)) {
             double refined = refineMainGf(kdeMain, gf, myLocation, enemyLocation,
                     enemyHeading, enemyVelocity, absBearing, mea, bulletSpeed);
             if (Math.abs(refined - gf) > 0.01) {
@@ -192,10 +199,22 @@ final class KnnGun {
             w.gfMain = gf;
         }
 
+        // 近距 / 高速逼近：KNN 库被冲浪对手主导，GF 峰远离 HOT/线性。
+        // rumble 上 rammer/nano 存活 90%+ 但 APS ~65%——枪打不中直线冲撞。
+        double ramBlend = useAs ? 0 : rammerAimBlend(distance, advancingVelocity);
+        if (ramBlend > 0) {
+            double simpleGf = Math.abs(enemyVelocity) < 1.0 ? 0.0
+                    : linearPredictGf(myLocation, enemyLocation, enemyHeading,
+                    enemyVelocity, absBearing, mea, bulletSpeed);
+            gf = gf * (1 - ramBlend) + simpleGf * ramBlend;
+            w.gfMain = gf;
+        }
+
         // 主动子弹阴影：临开火（≤1 tick 枪冷）时在候选角里选「命中分 / 冲浪危险^β」最优
+        // 冲撞局面阴影改角只会丢掉必中角，跳过
         boolean nearFire = robot.getGunHeat() <= robot.getGunCoolingRate() + 1e-9
                 && robot.getEnergy() > power && fireAllowed;
-        if (nearFire) {
+        if (nearFire && ramBlend < 0.35) {
             gf = activeShadowGf(useAs ? kdeAs : kdeMain, gf, myLocation, absBearing,
                     mea, bulletSpeed, power, time);
         }
@@ -216,6 +235,9 @@ final class KnnGun {
                 myShots++;
                 if (useAs) {
                     asFired++;
+                }
+                if (ramBlend > 0.15) {
+                    ramAimShots++;
                 }
                 // 子弹在下一 turn 移动前、炮管转动前发射：出膛角 = 当前炮管朝向
                 surfing.onMyBulletFired(b, myLocation, robot.getGunHeadingRadians(),
@@ -346,6 +368,17 @@ final class KnnGun {
     }
 
     /**
+     * 近距或敌方高速朝我冲时，把瞄准从 KNN 拉向 HOT（静止）/ 线性（运动）。
+     * 距离 ≥200 且非冲撞时为 0，不影响中远距 surfer。
+     */
+    private static double rammerAimBlend(double distance, double advancingVelocity) {
+        double byDist = distance < 160 ? RcMath.limit(0, (160 - distance) / 80, 1) : 0;
+        double byAdv = advancingVelocity > 5.5
+                ? RcMath.limit(0, (advancingVelocity - 5.5) / 2.5, 0.7) : 0;
+        return Math.max(byDist, byAdv);
+    }
+
+    /**
      * 主枪精确预测选角（阶段 3.1）：在 KDE 高分候选 + 匀速滑行 GF 上，
      * 用「敌人保持当前速度/朝向滑行」做子弹到达几何命中校验，
      * 取 density × (0.2 + 0.8×hit) 最高者。对 Tracker/Walls/直线走位收益最大。
@@ -454,6 +487,9 @@ final class KnnGun {
         if (baseline < 0) {
             return gfAim; // 没有在冲的波，阴影无从谈起
         }
+        // 中游 surfer 漏分：曾有 70–85% 射击被阴影改角、命中率~14%。
+        // 不用硬关阴影（Glacier 上硬关会掉分），改为抬瞄准门限 + 要求危险明显下降。
+        double enemyRoll = Surfing.enemyRollingHitRate();
         List<Double> candidates = buildShadowCandidates(kde, gfAim, myLocation,
                 absBearing, mea, bulletSpeed, time);
         double beta = Math.pow(
@@ -461,8 +497,11 @@ final class KnnGun {
                         * surfing.lastEnemyPower() / power, 0.25);
         // 命中分下限：阴影再好也不打「几乎不可能命中」的子弹——能量战里白扔一发的
         // 代价（-p 无返还）对紧平衡对手（如 Komarious）是净亏，实测不设门全线回退
-        // 3.3 候选变多后略抬门限，避免为阴影牺牲太多命中（0.35+网格曾使 Komarious 掉到 63%）
-        double aimFloor = 0.42 * kde.density(gfAim);
+        // 敌枪偏弱时抬门限，减少「略降危险就改角」的廉价阴影
+        double aimFloorMul = enemyRoll < 0.12 ? 0.55 : 0.42;
+        double aimFloor = aimFloorMul * kde.density(gfAim);
+        // 敌枪越弱，要求阴影带来的危险降幅越大（硬关在 Glacier 上已验证有害）
+        double maxDangerFrac = enemyRoll < 0.10 ? 0.85 : (enemyRoll < 0.12 ? 0.90 : 0.95);
         double bestScore = Double.NEGATIVE_INFINITY;
         double bestGf = gfAim;
         for (double gf : candidates) {
@@ -476,6 +515,9 @@ final class KnnGun {
                     myLocation, fireAngle, bulletSpeed, time);
             if (danger < 0) {
                 return gfAim;
+            }
+            if (Math.abs(gf - gfAim) > 1e-9 && danger > baseline * maxDangerFrac) {
+                continue;
             }
             double score = aimScore / Math.pow(Math.max(1e-6, danger), beta);
             if (score > bestScore) {

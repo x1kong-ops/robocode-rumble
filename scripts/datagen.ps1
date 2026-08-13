@@ -1,14 +1,15 @@
 # 离线训练数据采集：枪波 + 冲浪命中样本
 # 用法:
-#   .\scripts\datagen.ps1 [-Battles 2] [-Rounds 35] [-Pool mid|rumble|all] [-Gun] [-Surf]
+#   .\scripts\datagen.ps1 [-Battles 2] [-Rounds 35] [-Pool mid|rumble|all|leak] [-Gun] [-Surf]
 #   -Pool mid     中游风格（默认，与早期 datagen 一致）
 #   -Pool rumble  本机强/次强 rumble bot + 少量中游（阶段 3.5）
 #   -Pool all     mid + rumble
+#   -Pool leak    中游 surfer 漏分床（Gaff/Glacier/Lynx）+ 护栏锚点
 # 注意: 需要 -DNOSECURITY=true，仅本地 datagen 使用。
 param(
     [int]$Battles = 2,
     [int]$Rounds = 35,
-    [ValidateSet("mid", "rumble", "all")]
+    [ValidateSet("mid", "rumble", "all", "leak")]
     [string]$Pool = "mid",
     [string]$RobocodeHome = $(if ($env:ROBOCODE_HOME) { $env:ROBOCODE_HOME } else { "C:\robocode" }),
     [switch]$Gun,
@@ -66,9 +67,20 @@ $rumble = @(
     "nova.Snow 1.0"
 )
 
+# 中游 surfer 漏分床：目标对手加护栏，避免权重过拟合到单一风格
+$leak = @(
+    "darkcanuck.Gaff 1.50",
+    "ags.Glacier 0.3.2",
+    "lancel.Lynx 1.09",
+    "voidious.mini.Komarious 1.88",
+    "wiki.BasicGFSurfer 1.0",
+    "cx.mini.Cigaret 1.31"
+)
+
 $enemies = switch ($Pool) {
     "mid" { $mid }
     "rumble" { $rumble }
+    "leak" { $leak }
     default {
         $seen = @{}
         $all = @()
