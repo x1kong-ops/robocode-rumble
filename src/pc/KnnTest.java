@@ -44,6 +44,21 @@ public final class KnnTest {
             failures += check(knn, rnd, w.length, 50);
         }
 
+        // 3) 非线性嵌入：a≠1 时树与线性扫描仍应一致
+        double[] a = {0.7, 1.2, 0.5, 1.8, 1.0, 0.4, 2.0, 0.9};
+        double[] b = {0.05, 0.0, 0.1, 0.02, 0.0, 0.08, 0.0, 0.03};
+        Knn nl = new Knn(w, a, b, 4000);
+        for (int i = 0; i < 2000; i++) {
+            nl.add(randPoint(rnd, w.length), rnd.nextDouble() * 2 - 1, 1);
+        }
+        if (!nl.usingTree()) {
+            System.out.println("expected tree mode for nonlinear");
+            failures++;
+        }
+        for (int q = 0; q < 30; q++) {
+            failures += check(nl, rnd, w.length, 40);
+        }
+
         System.out.println("rebuilds=" + knn.rebuilds() + " size=" + knn.size()
                 + " failures=" + failures);
         System.out.println(failures == 0 ? "KNN TEST PASSED" : "KNN TEST FAILED");

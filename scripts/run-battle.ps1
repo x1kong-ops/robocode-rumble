@@ -26,6 +26,15 @@ robot.description=KNN surfing + KNN dual gun + score-max power + active shadows 
 robocode.version=1.10.3
 robot.java.source.included=false
 "@ | Set-Content -Path $props -Encoding ASCII
+$sparProps = Join-Path $root "out\classes\pc\Spar.properties"
+@"
+robot.classname=pc.Spar
+robot.version=dev
+robot.name=pc.Spar
+robot.description=Wavelet clone
+robocode.version=1.10.3
+robot.java.source.included=false
+"@ | Set-Content -Path $sparProps -Encoding ASCII
 # 先打到 out/ 再复制：roborumble 客户端常锁住 robots\*.jar，直接 jar cf 会失败
 $tmpJar = Join-Path $root "out\pc.Wavelet_dev.jar"
 $destJar = Join-Path $RobocodeHome "robots\pc.Wavelet_dev.jar"

@@ -25,8 +25,11 @@ final class PowerSelector {
             2.99, 2.75, 2.49, 2.3, 2.2, 2.1, 1.99, 1.9, 1.8, 1.7, 1.6, 1.49, 1.4, 1.3, 1.2, 1.1,
             0.99, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.49, 0.45, 0.4, 0.35, 0.3,
             0.25, 0.2, 0.175, 0.15, 0.125, 0.1};
-    private static final double ABS_HIT_RATE_GATE = 0.2;
-    private static final double FULL_POWER_DISTANCE = 140; // 沿用 1.4 实测值（BeepBoop 用 100）
+    private static double ABS_HIT_RATE_GATE = 0.2;
+    private static double FULL_POWER_DISTANCE = 140;
+    private static double RAM_CLOSE_DISTANCE = 180;
+    private static double RAM_CLOSE_ADVANCING = 5.5;
+    private static boolean bound;
     private static final double MIN_ENERGY = 0.05;
     private static final double POINTS_FOR_WIN = 60;
     private static final double BULLET_DAMAGE_BONUS = 0.2;
@@ -36,6 +39,18 @@ final class PowerSelector {
     private static final int[] POWER_HIST = new int[6]; // <0.5,<1,<1.5,<2,<2.5,≥2.5
 
     private PowerSelector() {
+    }
+
+    static void bind() {
+        if (bound) {
+            return;
+        }
+        bound = true;
+        Params p = Params.get();
+        ABS_HIT_RATE_GATE = p.absHitRateGate;
+        FULL_POWER_DISTANCE = p.fullPowerDistance;
+        RAM_CLOSE_DISTANCE = p.ramCloseDistance;
+        RAM_CLOSE_ADVANCING = p.ramCloseAdvancing;
     }
 
     /** 一方的命中率 / 伤害 / 近似得分跟踪（静态，跨回合累计）。 */
@@ -107,6 +122,17 @@ final class PowerSelector {
         ENEMY.roundEnd(iDied);
     }
 
+    /**
+     * 本回合近似 Robocode 得分（伤害×1.2 若该方获胜 + 60 存活分）。
+     * 须在 {@link #roundEnd} 清零 {@code damageThisRound} 之前调用。
+     */
+    static double roundPoints(boolean mine, boolean iWon, boolean iDied) {
+        Tracker t = mine ? MY : ENEMY;
+        boolean winner = mine ? iWon : iDied;
+        return t.damageThisRound * (winner ? 1 + BULLET_DAMAGE_BONUS : 1)
+                + (winner ? POINTS_FOR_WIN : 0);
+    }
+
     static String stats() {
         StringBuilder h = new StringBuilder();
         for (int c : POWER_HIST) {
@@ -134,6 +160,7 @@ final class PowerSelector {
     static double choosePower(double myEnergy, double enemyEnergy, double distance,
                               double lastEnemyPower, int roundNum, double coolingRate,
                               double advancingVelocity) {
+        bind();
         if (shouldRam(enemyEnergy)) {
             return -1; // 已 disable：子弹击杀不如撞击补分
         }
@@ -149,7 +176,7 @@ final class PowerSelector {
 
         double bestPower;
         // 贴身或高速冲撞：必中窗口，全功率（rammer/nano 漏分主要是伤害不够）
-        boolean ramClose = distance < 180 && advancingVelocity > 5.5;
+        boolean ramClose = distance < RAM_CLOSE_DISTANCE && advancingVelocity > RAM_CLOSE_ADVANCING;
         if (distance < FULL_POWER_DISTANCE || ramClose) {
             bestPower = 2.95; // 这个距离基本必中，模型不用跑
         } else {

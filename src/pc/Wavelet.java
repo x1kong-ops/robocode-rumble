@@ -25,8 +25,10 @@ import robocode.util.Utils;
  * Wavelet —— 1v1 主力机器人（pc.Wavelet dev）。
  * True Surfing（两波精确预测 + KNN 危险密度/学得嵌入 + 被动/主动 shadows + flattener）
  * + KNN(DC) 双枪（学得嵌入 + 主动阴影改角）
- * + 期望得分最大化火力（BeepBoop 模型）。
- * 架构参考 Diamond / BeepBoop；健康指标写入 stats.txt。
+ * + 期望得分最大化火力（BeepBoop 模型）
+ * + 四模式走位（SURF / WavePoison / FAR / SHIELD）按对手 CI 选择并跨场保存
+ * + 第三把虚拟枪 PM-PIF + 非线性 KNN 嵌入 + beam Path / 末端速度随机。
+ * 架构参考 Diamond / BeepBoop / Saguaro；健康指标写入 stats.txt。
  */
 public class Wavelet extends AdvancedRobot {
 
@@ -43,8 +45,24 @@ public class Wavelet extends AdvancedRobot {
 
     @Override
     public void run() {
+        Params.load(this);
+        if (getRoundNum() == 0) {
+            skippedTurns = 0;
+            wallHits = 0;
+            ModeBook.prepare(this);
+        }
+        roundWon = false;
+        roundDied = false;
+        enemyEnergy = 100;
+        prev = null;
+        setMaxVelocity(8);
+
         setBodyColor(new Color(28, 28, 40));
         setGunColor(new Color(90, 170, 255));
+        if (getClass() != Wavelet.class) {
+            setBodyColor(new Color(48, 24, 24));
+            setGunColor(new Color(255, 140, 80));
+        }
         setRadarColor(Color.WHITE);
         setBulletColor(new Color(255, 210, 90));
         setAdjustGunForRobotTurn(true);
@@ -64,13 +82,13 @@ public class Wavelet extends AdvancedRobot {
 
     @Override
     public void onScannedRobot(ScannedRobotEvent e) {
+        ModeBook.onScan(this, e.getName(), getRoundNum());
         Point2D.Double myLocation = new Point2D.Double(getX(), getY());
         double absBearingToEnemy = getHeadingRadians() + e.getBearingRadians();
         Point2D.Double enemyLocation =
                 RcMath.project(myLocation, absBearingToEnemy, e.getDistance());
 
-        // 雷达窄锁（factor 2）
-        setTurnRadarRightRadians(2 * Utils.normalRelativeAngle(
+        setTurnRadarRightRadians(Params.get().radarLock * Utils.normalRelativeAngle(
                 absBearingToEnemy - getRadarHeadingRadians()));
 
         // 我相对敌人的横向方向（粘滞，速度过小时保持原值）
@@ -160,11 +178,14 @@ public class Wavelet extends AdvancedRobot {
 
     @Override
     public void onRoundEnded(RoundEndedEvent e) {
+        ModeBook.endRound(this, roundWon, roundDied);
         PowerSelector.roundEnd(roundWon, roundDied);
         out.println("round " + (getRoundNum() + 1) + "/" + getNumRounds()
                 + " | knn data: " + KnnGun.dataSize()
                 + " | " + KnnGun.gunStats()
                 + " | " + PowerSelector.stats()
+                + " | " + ModeBook.stats()
+                + " | " + Params.stats()
                 + " | skipped turns (battle): " + skippedTurns);
     }
 
@@ -180,6 +201,9 @@ public class Wavelet extends AdvancedRobot {
             ps.println(KnnGun.gunStats().replace(' ', '\n'));
             ps.println(Surfing.surfStats().replace(' ', '\n'));
             ps.println(PowerSelector.stats().replace(' ', '\n'));
+            ps.println(ModeBook.stats().replace(' ', '\n'));
+            ps.println(Params.stats());
+            ModeBook.save(this);
             ps.close();
         } catch (Exception ignored) {
             // 统计写不出去不影响对战

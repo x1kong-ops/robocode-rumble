@@ -49,12 +49,25 @@ $jarName = $Package + "_" + $Version + ".jar"
 $jarPath = Join-Path $dist $jarName
 if (Test-Path $jarPath) { Remove-Item $jarPath }
 
+$sparClass = Join-Path $root "out\classes\$relDir\Spar.class"
+$sparPropsFile = Join-Path $root "out\classes\$relDir\Spar.properties"
+$stash = Join-Path $env:TEMP "pc-spar-exclude"
+if (Test-Path $stash) { Remove-Item $stash -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $stash | Out-Null
+Get-ChildItem (Join-Path $root "out\classes\$relDir") -Filter "*Test*.class" -ErrorAction SilentlyContinue |
+    ForEach-Object { Move-Item $_.FullName (Join-Path $stash $_.Name) -Force }
+if (Test-Path $sparClass) { Move-Item $sparClass (Join-Path $stash "Spar.class") -Force }
+if (Test-Path $sparPropsFile) { Move-Item $sparPropsFile (Join-Path $stash "Spar.properties") -Force }
+
 Push-Location (Join-Path $root "out\classes")
 try {
     jar cf $jarPath $entry
     if ($LASTEXITCODE -ne 0) { Write-Error "jar packaging failed" }
 } finally {
     Pop-Location
+    Get-ChildItem $stash -ErrorAction SilentlyContinue | ForEach-Object {
+        Move-Item $_.FullName (Join-Path $root "out\classes\$relDir\$($_.Name)") -Force
+    }
 }
 
 $robotsJar = Join-Path $RobocodeHome ("robots\" + $jarName)

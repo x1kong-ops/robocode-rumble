@@ -6,15 +6,14 @@ import java.util.List;
 import java.util.PriorityQueue;
 
 /**
- * KNN 存储（加权欧氏距离）：小库 / 环形淘汰期线性扫描；增长期用增量 kd-tree。
- * - 每条样本带先验权重与插入序号；
- * - 容量满后环形覆盖最旧样本；满容后回退线性（覆盖会破坏树不变量，频繁重建易 skippedTurns）；
- * - 增长期增量插入（无查询路径全量重建），避免 8 维下重建尖峰。
+ * KNN 存储。距离在嵌入空间：embed_i = w_i * (x_i + b_i)^|a_i|（BeepBoop）。
+ * a=1、b=0 时退化为原来的加权欧氏距离。
+ * 小库 / 环形淘汰期线性扫描；增长期用增量 kd-tree（在嵌入坐标上分裂）。
  */
 final class Knn {
 
     static final class Entry {
-        final double[] point;
+        final double[] point; // 已嵌入
         final double value;
         final double weight;
         final long seq;
@@ -40,6 +39,8 @@ final class Knn {
     private static final int LINEAR_LIMIT = 512;
 
     private final double[] weights;
+    private final double[] exponent; // |a|，默认全 1
+    private final double[] bias;     // b，默认全 0
     private final int dims;
     private final int capacity;
     private final List<Entry> entries = new ArrayList<Entry>();
@@ -51,13 +52,37 @@ final class Knn {
     private int inserts; // 诊断：树插入次数
 
     Knn(double[] weights, int capacity) {
+        this(weights, null, null, capacity);
+    }
+
+    Knn(double[] weights, double[] exponent, double[] bias, int capacity) {
         this.weights = weights;
         this.dims = weights.length;
+        this.exponent = exponent != null ? exponent : ones(this.dims);
+        this.bias = bias != null ? bias : new double[this.dims];
         this.capacity = capacity;
     }
 
+    private static double[] ones(int n) {
+        double[] a = new double[n];
+        for (int i = 0; i < n; i++) {
+            a[i] = 1;
+        }
+        return a;
+    }
+
+    /** BeepBoop 嵌入：w * (x + b)^|a|。x 在 [0,1]，b≥0 保证底为正。 */
+    double[] embed(double[] x) {
+        double[] z = new double[dims];
+        for (int i = 0; i < dims; i++) {
+            double base = Math.max(1e-9, x[i] + bias[i]);
+            z[i] = weights[i] * Math.pow(base, Math.abs(exponent[i]));
+        }
+        return z;
+    }
+
     void add(double[] point, double value, double weight) {
-        Entry e = new Entry(point, value, weight, seq++);
+        Entry e = new Entry(embed(point), value, weight, seq++);
         if (entries.size() < capacity) {
             entries.add(e);
             if (!ringMode && entries.size() > LINEAR_LIMIT) {
@@ -100,18 +125,23 @@ final class Knn {
             return new ArrayList<Neighbor>();
         }
         k = Math.min(k, entries.size());
+        double[] q = embed(query);
         if (ringMode || root == null || entries.size() <= LINEAR_LIMIT) {
-            return nearestLinear(query, k);
+            return nearestEmbedded(q, k);
         }
         PriorityQueue<Neighbor> heap = maxHeap(k);
-        search(root, query, k, heap);
+        search(root, q, k, heap);
         return new ArrayList<Neighbor>(heap);
     }
 
     List<Neighbor> nearestLinear(double[] query, int k) {
+        return nearestEmbedded(embed(query), k);
+    }
+
+    private List<Neighbor> nearestEmbedded(double[] q, int k) {
         PriorityQueue<Neighbor> heap = maxHeap(k);
         for (Entry e : entries) {
-            consider(heap, k, e, dist2(query, e.point));
+            consider(heap, k, e, dist2(q, e.point));
         }
         return new ArrayList<Neighbor>(heap);
     }
@@ -154,7 +184,7 @@ final class Knn {
         }
         consider(heap, k, node.entry, dist2(query, node.entry.point));
         int axis = node.axis;
-        double delta = weights[axis] * (query[axis] - node.entry.point[axis]);
+        double delta = query[axis] - node.entry.point[axis];
         Node near = delta < 0 ? node.left : node.right;
         Node far = delta < 0 ? node.right : node.left;
         search(near, query, k, heap);
@@ -166,7 +196,7 @@ final class Knn {
     private double dist2(double[] query, double[] point) {
         double d = 0;
         for (int i = 0; i < dims; i++) {
-            double z = weights[i] * (query[i] - point[i]);
+            double z = query[i] - point[i];
             d += z * z;
         }
         return d;

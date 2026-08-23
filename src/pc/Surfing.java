@@ -37,12 +37,35 @@ final class Surfing {
     private static final int MID = (BINS - 1) / 2;
     private static final double HALF_DIAGONAL = 18 * Math.sqrt(2); // 车身方形外接圆半径
 
-    // 距离控制
-    private static final double DESIRED_DISTANCE = 450;
-    private static final double SECOND_WAVE_WEIGHT = 0.5;
-    private static final double THIRD_WAVE_WEIGHT = 0.25; // 阶段 3.6：第三波低权前瞻
-    private static final double DIVE_PROTECT_DISTANCE = 360; // 低于此预测敌距开始惩罚俯冲
-    private static final double DANGER_EPSILON = 0.05;       // 零窗口选项间仍按距离分优劣
+    // 距离控制（FAR 模式把目标距离拉到 600，预测与执行共用 desiredDistance）
+    // 数值来自 Params；bind() 在首次构造时覆盖。
+    private static double DESIRED_DISTANCE = 450;
+    private static double FAR_DISTANCE = 600;
+    private static int shieldShots; // 诊断：SHIELD 模式拦截开火次数
+    private static double SECOND_WAVE_WEIGHT = 0.5;
+    private static double THIRD_WAVE_WEIGHT = 0.25; // 阶段 3.6：第三波低权前瞻
+    private static double DIVE_PROTECT_DISTANCE = 360; // 低于此预测敌距开始惩罚俯冲
+    private static double DANGER_EPSILON = 0.05;       // 零窗口选项间仍按距离分优劣
+    private static double LEAN_LIMIT = 0.35;
+    private static double FAR_LEAN_LIMIT = 0.45;
+    private static double POISON_VELOCITY = 0.5;
+    private static double POISON_MIN_DIST = 160;
+    private static double CLOSING_ABORT = 5;
+    private static double SHIELD_MIN_DIST = 180;
+    private static double FAR_CLOSE_DIST = 180;
+    private static double GOTO_LEAN = 0.3;
+    private static double GOTO_ORBIT_CAP = 500;
+    private static double GOTO_ORBIT_CAP_FAR = 620;
+    private static int PATH_CAP = 12;
+    private static double PATH_HALF_FRAC = 0.45;
+    private static double BEAM_ETA_MIN = 8;
+    private static int BEAM_WIDTH = 3;
+    private static int BEAM_TICKS_MIN = 6;
+    private static int BEAM_TICKS_MAX = 10;
+    private static double TERM_STOP_ETA = 3;
+    private static double TERM_STOP_HIT_RATE = 0.16;
+    private static double TERM_STOP_DANGER_SLACK = 0.08;
+    private static double TERM_STOP_PROB = 0.35;
 
     /**
      * 阶段 2.5：冲浪危险改为 KNN(DC) 密度（替代 3×3 分段 bin）。
@@ -53,12 +76,13 @@ final class Surfing {
     // 阶段 2.5：离线梯度下降学得（ml/train_surf_weights.py），留出集硬 KNN
     // 真实命中窗口命中率 0.251 -> 0.267（手工基线 {2,4,1,2,2,2.5,1,1.5}）
     // 阶段 3.5：rumble 全池重训（离线硬 KNN 0.719→0.732，+1.8%；advV/power 权重回升）
-    private static final double[] SURF_WEIGHTS = {5.388, 1.368, 1.721, 0.763, 1.204, 0.988, 0.258, 1.251};
-    private static final int SURF_DIMS = SURF_WEIGHTS.length;
-    private static final int SURF_K = 50;
-    private static final int SURF_CAPACITY = 20000;
-    private static final Knn SURF_DATA = new Knn(SURF_WEIGHTS, SURF_CAPACITY);
-    private static final double FLATTEN_SAMPLE_WEIGHT = 0.15;
+    // 阶段 2.1 / 3.5：线性权重。非线性 a、b 默认恒等（BeepBoop w(x+b)^|a|）；
+    // 有 datagen 后用 ml/train_surf_weights.py --nonlinear 覆盖。
+    private static final int SURF_DIMS = Params.SURF_DIMS;
+    private static int SURF_K = 50;
+    private static Knn SURF_DATA;
+    private static double FLATTEN_SAMPLE_WEIGHT = 0.15;
+    private static boolean bound;
 
     private static int lastSurfDirection = 1;
     private static int idleDirection = 1;
@@ -84,11 +108,11 @@ final class Surfing {
     // 用滚动窗口门控（非整场累计）——累计门控会在早期连中后锁死开启，伪命中冲掉
     // 真实命中峰 → 更易挨打 → 死亡螺旋（实测 BasicGFSurfer 87→78）。
     // 伪命中弱权重、不衰减，避免冲掉 logHit 的尖峰。
-    private static final double FLATTENER_ON = 0.12;
-    private static final double FLATTENER_OFF = 0.09;
-    private static final int FLATTENER_WINDOW = 40;
-    private static final int FLATTENER_MIN_SHOTS = 30;
-    private static final boolean[] FLAT_HITS = new boolean[FLATTENER_WINDOW];
+    private static double FLATTENER_ON = 0.12;
+    private static double FLATTENER_OFF = 0.09;
+    private static int FLATTENER_WINDOW = 40;
+    private static int FLATTENER_MIN_SHOTS = 30;
+    private static boolean[] FLAT_HITS = new boolean[40];
     private static int flatHead;
     private static int flatCount;
     private static int flatHitCount;
@@ -102,11 +126,11 @@ final class Surfing {
     private static final int MODEL_LIN = 2;
     private static final int MODEL_CIRC = 3;
     private static final int MODEL_COUNT = 4;
-    private static final double[] MODEL_SCORE = {2.0, 1.0, 0.9, 0.7};
-    private static final double MODEL_SCORE_DECAY = 0.97;
-    private static final double MODEL_MATCH_SIGMA = 0.18;
+    private static double[] MODEL_SCORE = {2.0, 1.0, 0.9, 0.7};
+    private static double MODEL_SCORE_DECAY = 0.97;
+    private static double MODEL_MATCH_SIGMA = 0.18;
     // 叠加到完整 KNN 上的简单枪峰幅（过大稀释冲浪、过小无收益；8 曾使 testbed 88.9→86.5）
-    private static final double CROWD_PEAK_SCALE = 3.5;
+    private static double CROWD_PEAK_SCALE = 3.5;
     private static int crowdUpdates;
 
     private final AdvancedRobot robot;
@@ -123,6 +147,8 @@ final class Surfing {
     private double lastEnemyPower = 1.9;
     private double enemyEnergy = 100;
     private EnemyWave pendingImaginary;
+    private int poisonDir = 1; // WavePoison：±0.5 横向，敌开火时翻转
+    private boolean poisonCapped; // 上一 tick 用了 0.5 上限，离开时要恢复 8
 
     static final class EnemyWave {
         Point2D.Double origin;
@@ -203,6 +229,8 @@ final class Surfing {
     private Point2D.Double targetEnd3;
     private static int activeShadowShots; // 诊断：主动阴影改变开火角的次数
     private static int pathWins;         // 诊断：Path/GoTo 方案击败 True 三选项的次数
+    private static int pathBeam;         // 诊断：beam 搜索产出的 GoTo 数
+    private static int termStops;        // 诊断：末端速度随机选择刹停
     private static int thirdWaveEvals;   // 诊断：附带第三波评估的次数
 
     /** Path surfing 候选：两阶段 True 或 GoTo 目标点。 */
@@ -255,6 +283,7 @@ final class Surfing {
     }
 
     Surfing(AdvancedRobot robot) {
+        bind();
         this.robot = robot;
         this.fieldW = robot.getBattleFieldWidth();
         this.fieldH = robot.getBattleFieldHeight();
@@ -262,7 +291,54 @@ final class Surfing {
         this.coolingRate = robot.getGunCoolingRate();
     }
 
+    static void bind() {
+        if (bound) {
+            return;
+        }
+        bound = true;
+        Params p = Params.get();
+        DESIRED_DISTANCE = p.desiredDistance;
+        FAR_DISTANCE = p.farDistance;
+        SECOND_WAVE_WEIGHT = p.secondWaveWeight;
+        THIRD_WAVE_WEIGHT = p.thirdWaveWeight;
+        DIVE_PROTECT_DISTANCE = p.diveProtectDistance;
+        DANGER_EPSILON = p.dangerEpsilon;
+        SURF_K = p.surfK;
+        FLATTEN_SAMPLE_WEIGHT = p.flattenSampleWeight;
+        FLATTENER_ON = p.flattenerOn;
+        FLATTENER_OFF = p.flattenerOff;
+        FLATTENER_WINDOW = p.flattenerWindow;
+        FLATTENER_MIN_SHOTS = p.flattenerMinShots;
+        FLAT_HITS = new boolean[FLATTENER_WINDOW];
+        MODEL_SCORE = p.modelScore.clone();
+        MODEL_SCORE_DECAY = p.modelScoreDecay;
+        MODEL_MATCH_SIGMA = p.modelMatchSigma;
+        CROWD_PEAK_SCALE = p.crowdPeakScale;
+        LEAN_LIMIT = p.leanLimit;
+        FAR_LEAN_LIMIT = p.farLeanLimit;
+        POISON_VELOCITY = p.poisonVelocity;
+        POISON_MIN_DIST = p.poisonMinDist;
+        CLOSING_ABORT = p.closingAbort;
+        SHIELD_MIN_DIST = p.shieldMinDist;
+        FAR_CLOSE_DIST = p.farCloseDist;
+        GOTO_LEAN = p.gotoLean;
+        GOTO_ORBIT_CAP = p.gotoOrbitCap;
+        GOTO_ORBIT_CAP_FAR = p.gotoOrbitCapFar;
+        PATH_CAP = p.pathCap;
+        PATH_HALF_FRAC = p.pathHalfFrac;
+        BEAM_ETA_MIN = p.beamEtaMin;
+        BEAM_WIDTH = p.beamWidth;
+        BEAM_TICKS_MIN = p.beamTicksMin;
+        BEAM_TICKS_MAX = p.beamTicksMax;
+        TERM_STOP_ETA = p.termStopEta;
+        TERM_STOP_HIT_RATE = p.termStopHitRate;
+        TERM_STOP_DANGER_SLACK = p.termStopDangerSlack;
+        TERM_STOP_PROB = p.termStopProb;
+        SURF_DATA = new Knn(p.surfWeights, p.surfExponents, p.surfBiases, p.surfCapacity);
+    }
+
     static String surfStats() {
+        bind();
         double[] w = softmaxWeights();
         return "shadowPieces=" + shadowPieces + " gunheatWaves=" + gunheatWaves
                 + " activeShadowShots=" + activeShadowShots
@@ -277,7 +353,10 @@ final class Surfing {
                 + String.format(java.util.Locale.US,
                 " crowdW=%.2f/%.2f/%.2f/%.2f", w[0], w[1], w[2], w[3])
                 + " pathWins=" + pathWins
-                + " thirdWave=" + thirdWaveEvals;
+                + " pathBeam=" + pathBeam
+                + " termStops=" + termStops
+                + " thirdWave=" + thirdWaveEvals
+                + " shieldShots=" + shieldShots;
     }
 
     /** 敌人最近一次开火功率（未观测到开火时为默认 1.9），PowerSelector 建模用。 */
@@ -316,12 +395,21 @@ final class Surfing {
             lastEnemyPower = firedPower;
             enemyGunHeat = 1 + firedPower / 5 - coolingRate; // 已冷却到 cur.time
             heatRefTime = cur.time;
+            if (ModeBook.poison()) {
+                poisonDir = -poisonDir;
+            }
         }
         double omegaNow = hasMyHeading
                 ? Utils.normalRelativeAngle(cur.myHeading - lastMyHeading) : 0;
         updateGunheatWave(cur, enemyEnergy, omegaNow);
         updateWaves(cur);
-        surf(cur);
+        if (!tryPoisonMove(cur, prev) && !tryShieldMove(cur, prev)) {
+            if (poisonCapped) {
+                robot.setMaxVelocity(8);
+                poisonCapped = false;
+            }
+            surf(cur);
+        }
         // 速度历史：本 tick 结束后供下一发波的加速度特征
         speedT2 = speedT1;
         speedT1 = Math.hypot(cur.myLateralVelocity, cur.myAdvancingVelocity);
@@ -952,8 +1040,10 @@ final class Surfing {
     private double orbitAngle(Point2D.Double origin, Point2D.Double pos, Point2D.Double enemy,
                               int direction) {
         double distToEnemy = pos.distance(enemy);
-        double lean = RcMath.limit(-0.35,
-                (distToEnemy - DESIRED_DISTANCE) / DESIRED_DISTANCE, 0.35);
+        double desired = desiredDistance(enemy, pos);
+        double leanLim = ModeBook.far() ? FAR_LEAN_LIMIT : LEAN_LIMIT;
+        double lean = RcMath.limit(-leanLim,
+                (distToEnemy - desired) / desired, leanLim);
         double angle = RcMath.absoluteBearing(origin, pos) + direction * (Math.PI / 2 + lean);
         // 探针固定偏长、只随敌距收缩：短探针会诱导低速贴墙（低速撞墙无伤害、
         // 模拟里看不出代价，但被困墙边对后续波是灾难）——实测撞墙数会暴涨
@@ -1156,6 +1246,149 @@ final class Surfing {
 
     // ===================== 决策与执行 =====================
 
+    /**
+     * WavePoison（Simonton）：以 0.5 横向蠕动，敌开火瞬间翻向 -0.5。
+     * 贴身或残废撞击时回退普通冲浪，避免被 rammer 活剥。
+     */
+    private boolean tryPoisonMove(Snapshot cur, Snapshot prev) {
+        if (!ModeBook.poison() || PowerSelector.shouldRam(enemyEnergy)) {
+            return false;
+        }
+        double dist = cur.myLocation.distance(cur.enemyLocation);
+        if (dist < POISON_MIN_DIST) {
+            return false;
+        }
+        // rammer 从远处压过来时 0.5 蠕动会被逼进墙；BGF 环绕的距离抖动通常 <5
+        if (prev != null && prev.myLocation.distance(prev.enemyLocation) - dist > CLOSING_ABORT) {
+            return false;
+        }
+        lastEvalTime = cur.time;
+        targetWave1 = targetWave2 = targetWave3 = null;
+        targetEnd1 = targetEnd2 = targetEnd3 = null;
+        chosenEval = null;
+        lastEvals[0] = lastEvals[1] = lastEvals[2] = null;
+        robot.setMaxVelocity(POISON_VELOCITY);
+        poisonCapped = true;
+        setBackAsFront(orbitAngle(cur.enemyLocation, cur.myLocation, cur.enemyLocation,
+                poisonDir), 100);
+        return true;
+    }
+
+    /**
+     * 静止盾：停住给炮管对拦截角。贴身 / 残废撞击 / rammer 压近时回退冲浪。
+     */
+    private boolean tryShieldMove(Snapshot cur, Snapshot prev) {
+        if (!ModeBook.shield() || PowerSelector.shouldRam(enemyEnergy)) {
+            return false;
+        }
+        double dist = cur.myLocation.distance(cur.enemyLocation);
+        if (dist < SHIELD_MIN_DIST) {
+            return false;
+        }
+        if (prev != null && prev.myLocation.distance(prev.enemyLocation) - dist > CLOSING_ABORT) {
+            return false;
+        }
+        lastEvalTime = cur.time;
+        targetWave1 = targetWave2 = targetWave3 = null;
+        targetEnd1 = targetEnd2 = targetEnd3 = null;
+        chosenEval = null;
+        lastEvals[0] = lastEvals[1] = lastEvals[2] = null;
+        if (poisonCapped) {
+            robot.setMaxVelocity(8);
+            poisonCapped = false;
+        }
+        robot.setAhead(0);
+        robot.setTurnRightRadians(0);
+        return true;
+    }
+
+    /** FAR 拉距；贴身仍用 450，避免被 rammer 用远轨道公式往里勒。 */
+    private double desiredDistance(Point2D.Double enemy, Point2D.Double pos) {
+        if (ModeBook.far() && pos.distance(enemy) >= FAR_CLOSE_DIST) {
+            return FAR_DISTANCE;
+        }
+        return DESIRED_DISTANCE;
+    }
+
+    /**
+     * HOT 拦截角：假设敌弹沿开火时敌→我方向飞，求与我 0.1 弹最早对撞方位。
+     * 无解 / 来不及 / 虚波 → NaN。
+     */
+    double shieldFireAngle(Point2D.Double me, long time) {
+        EnemyWave w = closestRealIncoming(me, time);
+        if (w == null) {
+            return Double.NaN;
+        }
+        double age = time - w.fireTime;
+        if (age < 0) {
+            return Double.NaN;
+        }
+        double vx = Math.sin(w.directAngle) * w.speed;
+        double vy = Math.cos(w.directAngle) * w.speed;
+        double px = w.origin.x + vx * age;
+        double py = w.origin.y + vy * age;
+        double rx = px - me.x;
+        double ry = py - me.y;
+        double vs = RcMath.bulletSpeed(0.1);
+        double r2 = rx * rx + ry * ry;
+        double rDotV = rx * vx + ry * vy;
+        double a = vs * vs - w.speed * w.speed;
+        double t;
+        if (Math.abs(a) < 1e-6) {
+            if (Math.abs(rDotV) < 1e-6) {
+                return Double.NaN;
+            }
+            t = -r2 / (2 * rDotV);
+        } else {
+            double disc = rDotV * rDotV + a * r2;
+            if (disc < 0) {
+                return Double.NaN;
+            }
+            double sqrt = Math.sqrt(disc);
+            double t1 = (rDotV + sqrt) / a;
+            double t2 = (rDotV - sqrt) / a;
+            t = Double.POSITIVE_INFINITY;
+            if (t1 > 1) {
+                t = t1;
+            }
+            if (t2 > 1 && t2 < t) {
+                t = t2;
+            }
+            if (t == Double.POSITIVE_INFINITY) {
+                return Double.NaN;
+            }
+        }
+        double remaining = w.origin.distance(me) - age * w.speed;
+        if (!(t > 1) || t > remaining / w.speed - 1) {
+            return Double.NaN;
+        }
+        return Math.atan2(px + vx * t - me.x, py + vy * t - me.y);
+    }
+
+    private EnemyWave closestRealIncoming(Point2D.Double pos, long time) {
+        EnemyWave best = null;
+        double bestEta = Double.POSITIVE_INFINITY;
+        for (EnemyWave w : waves) {
+            if (w.imaginary) {
+                continue;
+            }
+            double remaining = w.origin.distance(pos) - (time - w.fireTime) * w.speed;
+            if (remaining <= w.speed * 2) {
+                continue;
+            }
+            double eta = remaining / w.speed;
+            if (eta < bestEta) {
+                bestEta = eta;
+                best = w;
+            }
+        }
+        return best;
+    }
+
+    static void noteShieldShot() {
+        shieldShots++;
+    }
+
     private void surf(Snapshot cur) {
         EnemyWave w1 = closestSurfableWave(cur.myLocation, cur.time);
         lastEvalTime = cur.time;
@@ -1199,7 +1432,7 @@ final class Surfing {
                 - (cur.time - w1.fireTime) * w1.speed;
         double eta = remaining / w1.speed;
         if (eta >= 6) {
-            for (PathSpec spec : buildPathSpecs(w1, cur, eta)) {
+            for (PathSpec spec : buildPathSpecs(w1, cur, eta, now, enemy)) {
                 OptionEval ev = evaluatePath(now, w1, enemy, order, spec);
                 double total = optionTotal(ev, null, null, null);
                 // 需明显更好才换 Path，抑制无谓抖动
@@ -1242,6 +1475,25 @@ final class Surfing {
                     targetWave3 = sw.wave;
                     targetEnd3 = sw.crossPos;
                 }
+            }
+        }
+
+        // 末端速度随机：仅在敌枪打得中（flattener 开或滚动命中率高）时打散精确交点。
+        // 对普通 GF 冲浪乱刹停会送弹，BGF 上曾掉到 78%。
+        if (eta <= TERM_STOP_ETA && lastEvals[1] != null
+                && (flattenerOn || rollingEnemyHitRate() > TERM_STOP_HIT_RATE)) {
+            double stopD = optionTotal(lastEvals[1], null, null, null);
+            if (stopD < bestDanger + TERM_STOP_DANGER_SLACK && Math.random() < TERM_STOP_PROB) {
+                termStops++;
+                double turn = Utils.normalRelativeAngle(
+                        orbitAngle(w1.origin, cur.myLocation, enemy, lastSurfDirection)
+                                - robot.getHeadingRadians());
+                if (Math.abs(turn) > Math.PI / 2) {
+                    turn = Utils.normalRelativeAngle(turn + Math.PI);
+                }
+                robot.setTurnRightRadians(turn);
+                robot.setAhead(0);
+                return;
             }
         }
 
@@ -1327,40 +1579,100 @@ final class Surfing {
         }
     }
 
-    /** 两阶段 / GoTo 候选（控制数量，避免 skipped turns）。 */
-    private List<PathSpec> buildPathSpecs(EnemyWave w1, Snapshot cur, double eta) {
+    /** 两阶段 / GoTo / beam 搜索候选（控制数量，避免 skipped turns）。 */
+    private List<PathSpec> buildPathSpecs(EnemyWave w1, Snapshot cur, double eta,
+                                          MoveState now, Point2D.Double enemy) {
         List<PathSpec> specs = new ArrayList<PathSpec>();
         int dir = lastSurfDirection;
-        int half = Math.max(2, (int) (eta * 0.45));
+        int half = Math.max(2, (int) (eta * PATH_HALF_FRAC));
         int third = Math.max(2, (int) (eta / 3));
-        // 两阶段 True：先冲后停 / 先停后冲 / 冲一段再反向
         specs.add(PathSpec.twoPhase(dir, half, 0));
         specs.add(PathSpec.twoPhase(0, Math.min(4, third), dir));
         specs.add(PathSpec.twoPhase(dir, third, -dir));
         specs.add(PathSpec.twoPhase(-dir, third, dir));
-        // GoTo：沿波圆轨道采样低危候选点（不同 lean / 距离）
         double base = RcMath.absoluteBearing(w1.origin, cur.myLocation);
         double dist = cur.myLocation.distance(w1.origin);
-        double[] leans = {-0.3, 0.05, 0.3};
-        double[] dists = {
-                RcMath.limit(120, dist, 500),
-                RcMath.limit(120, DESIRED_DISTANCE, 500)};
+        double desired = desiredDistance(cur.enemyLocation, cur.myLocation);
+        double cap = ModeBook.far() ? GOTO_ORBIT_CAP_FAR : GOTO_ORBIT_CAP;
+        double[] leans = {-GOTO_LEAN, GOTO_LEAN};
         for (int d : new int[]{dir, -dir}) {
             for (double lean : leans) {
-                for (double rd : dists) {
-                    double ang = base + d * (Math.PI / 2 + lean);
-                    Point2D.Double t = RcMath.project(w1.origin, ang, rd);
-                    if (field.contains(t) && t.distance(cur.myLocation) > 40) {
-                        specs.add(PathSpec.goTo(t, d));
-                    }
+                Point2D.Double t = RcMath.project(w1.origin,
+                        base + d * (Math.PI / 2 + lean),
+                        RcMath.limit(120, desired, cap));
+                if (field.contains(t) && t.distance(cur.myLocation) > 40) {
+                    specs.add(PathSpec.goTo(t, d));
                 }
             }
         }
-        // 上限：控制 CPU（True 3 + Path≤10 ≈ 二波评估可接受）
-        if (specs.size() > 10) {
-            return new ArrayList<PathSpec>(specs.subList(0, 10));
+        // 有界 beam：按时间均匀代价搜索可达落点，再当 GoTo 精评
+        if (eta >= BEAM_ETA_MIN) {
+            for (MoveState end : beamSearch(w1, now, enemy, eta)) {
+                if (end.pos.distance(cur.myLocation) > 40 && field.contains(end.pos)) {
+                    int d = orbitDir(w1.origin, cur.myLocation, end.pos, dir);
+                    specs.add(PathSpec.goTo(end.pos, d));
+                    pathBeam++;
+                }
+            }
+        }
+        if (specs.size() > PATH_CAP) {
+            return new ArrayList<PathSpec>(specs.subList(0, PATH_CAP));
         }
         return specs;
+    }
+
+    private static int orbitDir(Point2D.Double origin, Point2D.Double from, Point2D.Double to, int fallback) {
+        double a0 = RcMath.absoluteBearing(origin, from);
+        double a1 = RcMath.absoluteBearing(origin, to);
+        double rel = Utils.normalRelativeAngle(a1 - a0);
+        if (Math.abs(rel) < 1e-3) {
+            return fallback;
+        }
+        return rel > 0 ? 1 : -1;
+    }
+
+    /**
+     * 宽度 3 的时间 beam：每 tick 扩 {顺,停,逆}，按绕波源方位均匀留 3 个状态。
+     * 只做物理、不做 KNN 危险，把落点交给 predictGoto。
+     */
+    private List<MoveState> beamSearch(EnemyWave w, MoveState start, Point2D.Double enemy, double eta) {
+        List<MoveState> beam = new ArrayList<MoveState>();
+        beam.add(start.copy());
+        int[] opts = {lastSurfDirection, 0, -lastSurfDirection};
+        int ticks = Math.max(BEAM_TICKS_MIN, Math.min((int) eta + 2, BEAM_TICKS_MAX));
+        for (int t = 0; t < ticks; t++) {
+            List<MoveState> next = new ArrayList<MoveState>(beam.size() * 3);
+            for (int i = 0, n = beam.size(); i < n; i++) {
+                MoveState s = beam.get(i);
+                for (int o = 0; o < 3; o++) {
+                    MoveState c = s.copy();
+                    stepFast(c, w, opts[o]);
+                    next.add(c);
+                }
+            }
+            beam = pruneBeam(next, w.origin, BEAM_WIDTH);
+        }
+        return beam;
+    }
+
+    private static List<MoveState> pruneBeam(List<MoveState> cand, Point2D.Double origin, int keep) {
+        if (cand.size() <= keep) {
+            return cand;
+        }
+        Collections.sort(cand, new Comparator<MoveState>() {
+            @Override
+            public int compare(MoveState a, MoveState b) {
+                return Double.compare(
+                        RcMath.absoluteBearing(origin, a.pos),
+                        RcMath.absoluteBearing(origin, b.pos));
+            }
+        });
+        List<MoveState> out = new ArrayList<MoveState>(keep);
+        int n = cand.size();
+        for (int i = 0; i < keep; i++) {
+            out.add(cand.get(i * (n - 1) / (keep - 1)));
+        }
+        return out;
     }
 
     /** 先 opt1 走 ticks1 步，再改 opt2，直到波越过。 */
@@ -1394,7 +1706,35 @@ final class Surfing {
         return finishPrediction(s, ww, enemy);
     }
 
-    /** 朝目标点行驶直到波越过（GoTo Surfing）。 */
+    /** beam 用：无墙壁平滑的廉价物理，避免搜索阶段 skipped turns。 */
+    private void stepFast(MoveState s, EnemyWave w, int option) {
+        double maxTurning = Math.PI / 720d * (40d - 3d * Math.abs(s.velocity));
+        if (option == 0) {
+            s.velocity = s.velocity > 0 ? Math.max(0, s.velocity - 2) : Math.min(0, s.velocity + 2);
+        } else {
+            double go = RcMath.absoluteBearing(w.origin, s.pos) + option * (Math.PI / 2);
+            double moveAngle = go - s.heading;
+            double moveDir = 1;
+            if (Math.cos(moveAngle) < 0) {
+                moveAngle += Math.PI;
+                moveDir = -1;
+            }
+            moveAngle = Utils.normalRelativeAngle(moveAngle);
+            s.heading = Utils.normalRelativeAngle(
+                    s.heading + RcMath.limit(-maxTurning, moveAngle, maxTurning));
+            s.velocity += s.velocity * moveDir < 0 ? 2 * moveDir : moveDir;
+            s.velocity = RcMath.limit(-8, s.velocity, 8);
+        }
+        s.pos = RcMath.project(s.pos, s.heading, s.velocity);
+        if (!field.contains(s.pos)) {
+            s.pos = new Point2D.Double(
+                    RcMath.limit(field.x, s.pos.x, field.x + field.width),
+                    RcMath.limit(field.y, s.pos.y, field.y + field.height));
+            s.velocity = 0;
+        }
+        s.time++;
+    }
+
     private Prediction predictGoto(MoveState start, EnemyWave w, Point2D.Double target,
                                    Point2D.Double enemy) {
         MoveState s = start.copy();

@@ -106,6 +106,8 @@ def main():
     ap.add_argument("--min-history", type=int, default=40)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--skip-eval", action="store_true")
+    ap.add_argument("--nonlinear", action="store_true",
+                    help="枪侧见 train_gun_weights.py --nonlinear；冲浪同样公式，需自备 surf csv")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)

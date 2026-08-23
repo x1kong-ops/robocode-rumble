@@ -29,32 +29,34 @@ final class KnnGun {
     // 留出集硬 KNN 车身窗口命中率 0.322 -> 0.341（手工权重基线 {2,4,1,2,2,2.5,1,2}）
     // 阶段 3.5：rumble 全池重训（离线硬 KNN 相对线上基线 -0.4%，比例微调）
     // 阶段 3.8 leakbed 重训试过并放弃：离线硬 KNN +0.5%，实战 Gaff/Komarious/Cigaret 均掉 3–4%
-    private static final double[] WEIGHTS = {5.290, 0.841, 2.623, 0.573, 1.096, 1.342, 0.980, 0.621};
-    private static final int DIMS = WEIGHTS.length;
+    // 阶段 2.1 / 3.5：线性权重。非线性 a、b 默认恒等；覆盖见 Params。
+    private static double[] WEIGHTS = {5.290, 0.841, 2.623, 0.573, 1.096, 1.342, 0.980, 0.621};
+    private static double[] EXPONENTS = {1, 1, 1, 1, 1, 1, 1, 1};
+    private static double[] BIASES = {0, 0, 0, 0, 0, 0, 0, 0};
+    private static int DIMS = WEIGHTS.length;
 
     // 通用枪
-    private static final int MAIN_K = 50;
-    // anti-surfer 枪
-    // 漏分床实测：加快遗忘/更早切换（cap800–1500、hl120–200、margin0.02–0.03）
-    // 在 Gaff/Glacier 上 asFired↑ 或抖动↑，得分持平或下降——参数回退到原值。
-    private static final int AS_K = 20;
-    private static final int AS_CAPACITY = 2000;      // 小容量环形缓冲：物理上只留最近样本
-    private static final double AS_HALF_LIFE = 300;   // 年龄半衰期（按插入条数，≈1/3 回合）
-    private static final double AS_VIRTUAL_WEIGHT = 0.05;
-    // 虚拟枪记分：衰减累计软分（核距离），比二值命中 EMA 稳得多，避免选枪来回抖
-    // 通用枪是默认；AS 枪必须「明显」领先才接管——分差在噪声带内时换枪只会两头吃亏
-    private static final double SCORE_DECAY = 0.995;  // 有效窗口 ≈ 最近 200 个开火波
-    private static final double AS_SWITCH_MARGIN = 0.05;
-    private static final int MIN_WAVES_TO_SWITCH = 50;
+    private static int MAIN_K = 50;
+    private static int AS_K = 20;
+    private static int AS_CAPACITY = 2000;
+    private static double AS_HALF_LIFE = 300;
+    private static double AS_VIRTUAL_WEIGHT = 0.05;
+    private static double SCORE_DECAY = 0.995;
+    private static double AS_SWITCH_MARGIN = 0.05;
+    private static int MIN_WAVES_TO_SWITCH = 50;
+    private static double PIF_SWITCH_MARGIN = 0.08;
 
     /** 样本库与两把枪的记分，跨回合保留。 */
-    private static final Knn MAIN_DATA = new Knn(WEIGHTS, 60000);
-    private static final Knn AS_DATA = new Knn(WEIGHTS, AS_CAPACITY);
+    private static Knn MAIN_DATA;
+    private static Knn AS_DATA;
+    private static boolean bound;
     private static double mainScore;
     private static double asScore;
+    private static double pifScore;
     private static double scoreNorm; // 衰减后的分母（≈样本数）
     private static int realWaves;
     private static int asFired; // 用 AS 枪开的真实炮数（诊断）
+    private static int pifFired;
 
     // 实弹命中率（能量管理用）。用整场累计而非滚动窗口：滚动窗口对冲浪对手会在
     // 连中片段里冲过阈值、误触发重弹（弹速慢 → 逃逸角大 → 更好躲），来回震荡两头亏
@@ -73,6 +75,22 @@ final class KnnGun {
     private int enemyLateralDirection = 1;
     private long lastDirChangeTime;
     private final List<Point2D.Double> enemyHistory = new ArrayList<Point2D.Double>();
+    private double prevEnemyHeading;
+    private boolean hasEnemyHeading;
+
+    // PM-PIF：环形记录敌方 (latV, omega, vel)，匹配历史窗口后把后续动作接到当前状态上前推
+    private static int PIF_CAP = 1800;
+    private static int PIF_PAT = 10;
+    private static int PIF_K = 6;
+    private static int REFINE_MIN_SHOTS = 80;
+    private static double REFINE_MIN_HIT_RATE = 0.16;
+    private static double RAMMER_AIM_DIST = 160;
+    private static double RAMMER_AIM_ADV = 5.5;
+    private final double[] pifLat;
+    private final double[] pifOmg;
+    private final double[] pifVel;
+    private int pifSize;
+    private int pifHead;
 
     // 离线训练数据导出：-Drcr.datalog=<csv 路径> 时启用（需 -DNOSECURITY=true，仅 datagen 用）
     private static java.io.PrintWriter dataLog;
@@ -88,25 +106,62 @@ final class KnnGun {
         boolean real;   // 该 tick 真的发射了子弹
         double gfMain;  // 开火 tick 两把枪各自的预测（记分用）
         double gfAs;
+        double gfPif;
     }
 
     KnnGun(AdvancedRobot robot, Surfing surfing) {
+        bind();
         this.robot = robot;
         this.surfing = surfing;
         this.field = new Rectangle2D.Double(18, 18,
                 robot.getBattleFieldWidth() - 36, robot.getBattleFieldHeight() - 36);
+        this.pifLat = new double[PIF_CAP];
+        this.pifOmg = new double[PIF_CAP];
+        this.pifVel = new double[PIF_CAP];
+    }
+
+    static void bind() {
+        if (bound) {
+            return;
+        }
+        bound = true;
+        Params p = Params.get();
+        WEIGHTS = p.gunWeights;
+        EXPONENTS = p.gunExponents;
+        BIASES = p.gunBiases;
+        DIMS = WEIGHTS.length;
+        MAIN_K = p.mainK;
+        AS_K = p.asK;
+        AS_CAPACITY = p.asCapacity;
+        AS_HALF_LIFE = p.asHalfLife;
+        AS_VIRTUAL_WEIGHT = p.asVirtualWeight;
+        SCORE_DECAY = p.scoreDecay;
+        AS_SWITCH_MARGIN = p.asSwitchMargin;
+        MIN_WAVES_TO_SWITCH = p.minWavesToSwitch;
+        PIF_SWITCH_MARGIN = p.pifSwitchMargin;
+        PIF_CAP = p.pifCap;
+        PIF_PAT = p.pifPat;
+        PIF_K = p.pifK;
+        REFINE_MIN_SHOTS = p.refineMinShots;
+        REFINE_MIN_HIT_RATE = p.refineMinHitRate;
+        RAMMER_AIM_DIST = p.rammerAimDist;
+        RAMMER_AIM_ADV = p.rammerAimAdv;
+        MAIN_DATA = new Knn(WEIGHTS, EXPONENTS, BIASES, p.gunCapacity);
+        AS_DATA = new Knn(WEIGHTS, EXPONENTS, BIASES, AS_CAPACITY);
     }
 
     static int dataSize() {
+        bind();
         return MAIN_DATA.size();
     }
 
     /** 健康指标：两枪虚拟命中率、AS 枪使用量、实弹命中率。 */
     static String gunStats() {
+        bind();
         double n = Math.max(1e-9, scoreNorm);
         return String.format(
-                "gunMain=%.3f gunAS=%.3f realWaves=%d asFired=%d hitRate=%.3f myShots=%d preciseRefine=%d ramAim=%d",
-                mainScore / n, asScore / n, realWaves, asFired, myHitRate(), myShots,
+                "gunMain=%.3f gunAS=%.3f gunPif=%.3f realWaves=%d asFired=%d pifFired=%d hitRate=%.3f myShots=%d preciseRefine=%d ramAim=%d",
+                mainScore / n, asScore / n, pifScore / n, realWaves, asFired, pifFired, myHitRate(), myShots,
                 preciseRefineUses, ramAimShots);
     }
 
@@ -122,6 +177,12 @@ final class KnnGun {
     private static boolean useAsGun() {
         return scoreNorm >= MIN_WAVES_TO_SWITCH
                 && (asScore - mainScore) / scoreNorm > AS_SWITCH_MARGIN;
+    }
+
+    private static boolean usePifGun() {
+        double best = Math.max(mainScore, asScore);
+        return scoreNorm >= MIN_WAVES_TO_SWITCH
+                && (pifScore - best) / scoreNorm > PIF_SWITCH_MARGIN;
     }
 
     void onScan(Point2D.Double myLocation, Point2D.Double enemyLocation,
@@ -144,6 +205,7 @@ final class KnnGun {
         }
         prevEnemyVelocity = enemyVelocity;
         hasPrev = true;
+        recordPif(lateralVelocity, enemyHeading, enemyVelocity);
 
         breakWaves(enemyLocation, time);
 
@@ -183,13 +245,16 @@ final class KnnGun {
         Kde kdeAs = kde(AS_DATA, f, AS_K, bandwidth, AS_HALF_LIFE);
         w.gfMain = kdeMain.bestGf();
         w.gfAs = kdeAs.bestGf();
-        boolean useAs = useAsGun();
-        double gf = useAs ? w.gfAs : w.gfMain;
+        w.gfPif = pifGf(myLocation, enemyLocation, enemyHeading, enemyVelocity,
+                absBearing, mea, bulletSpeed);
+        boolean usePif = usePifGun();
+        boolean useAs = !usePif && useAsGun();
+        double gf = usePif ? w.gfPif : (useAs ? w.gfAs : w.gfMain);
 
-        // 主枪：匀速滑行精确预测校验候选 GF（AS 枪对手会反应反应，不做线性假设）
+        // 主枪：匀速滑行精确预测校验候选 GF（AS / PIF 不做线性拉扯）
         // 命中率已经很低时对手在躲线性/匀速，再把瞄准往线性拉只会更偏（Samekh/Tigger）
-        if (!useAs && MAIN_DATA.size() > 0
-                && (myShots < 80 || myHitRate() >= 0.16)) {
+        if (!usePif && !useAs && MAIN_DATA.size() > 0
+                && (myShots < REFINE_MIN_SHOTS || myHitRate() >= REFINE_MIN_HIT_RATE)) {
             double refined = refineMainGf(kdeMain, gf, myLocation, enemyLocation,
                     enemyHeading, enemyVelocity, absBearing, mea, bulletSpeed);
             if (Math.abs(refined - gf) > 0.01) {
@@ -201,7 +266,7 @@ final class KnnGun {
 
         // 近距 / 高速逼近：KNN 库被冲浪对手主导，GF 峰远离 HOT/线性。
         // rumble 上 rammer/nano 存活 90%+ 但 APS ~65%——枪打不中直线冲撞。
-        double ramBlend = useAs ? 0 : rammerAimBlend(distance, advancingVelocity);
+        double ramBlend = (useAs || usePif) ? 0 : rammerAimBlend(distance, advancingVelocity);
         if (ramBlend > 0) {
             double simpleGf = Math.abs(enemyVelocity) < 1.0 ? 0.0
                     : linearPredictGf(myLocation, enemyLocation, enemyHeading,
@@ -212,7 +277,10 @@ final class KnnGun {
 
         // 主动子弹阴影：临开火（≤1 tick 枪冷）时在候选角里选「命中分 / 冲浪危险^β」最优
         // 冲撞局面阴影改角只会丢掉必中角，跳过
-        boolean nearFire = robot.getGunHeat() <= robot.getGunCoolingRate() + 1e-9
+        boolean shieldMode = ModeBook.shield() && distance >= Params.get().shieldMinDist
+                && !PowerSelector.shouldRam(enemyEnergy);
+        boolean nearFire = !shieldMode
+                && robot.getGunHeat() <= robot.getGunCoolingRate() + 1e-9
                 && robot.getEnergy() > power && fireAllowed;
         if (nearFire && ramBlend < 0.35) {
             gf = activeShadowGf(useAs ? kdeAs : kdeMain, gf, myLocation, absBearing,
@@ -222,6 +290,19 @@ final class KnnGun {
 
         double fireAngle = Utils.normalAbsoluteAngle(
                 absBearing + gf * mea * enemyLateralDirection);
+        if (shieldMode) {
+            double intercept = surfing.shieldFireAngle(myLocation, time);
+            if (!Double.isNaN(intercept)) {
+                fireAngle = intercept;
+                power = 0.1;
+                bulletSpeed = RcMath.bulletSpeed(power);
+                w.speed = bulletSpeed;
+                fireAllowed = robot.getEnergy() > 1.0;
+            } else {
+                fireAngle = absBearing;
+                fireAllowed = false;
+            }
+        }
         robot.setTurnGunRightRadians(
                 Utils.normalRelativeAngle(fireAngle - robot.getGunHeadingRadians()));
 
@@ -233,7 +314,12 @@ final class KnnGun {
             if (b != null) {
                 w.real = true;
                 myShots++;
-                if (useAs) {
+                if (shieldMode) {
+                    Surfing.noteShieldShot();
+                }
+                if (usePif) {
+                    pifFired++;
+                } else if (useAs) {
                     asFired++;
                 }
                 if (ramBlend > 0.15) {
@@ -267,8 +353,10 @@ final class KnnGun {
                 if (w.real) {
                     double zm = (w.gfMain - gf) / gfWidth;
                     double za = (w.gfAs - gf) / gfWidth;
+                    double zp = (w.gfPif - gf) / gfWidth;
                     mainScore = mainScore * SCORE_DECAY + Math.exp(-0.5 * zm * zm);
                     asScore = asScore * SCORE_DECAY + Math.exp(-0.5 * za * za);
+                    pifScore = pifScore * SCORE_DECAY + Math.exp(-0.5 * zp * zp);
                     scoreNorm = scoreNorm * SCORE_DECAY + 1;
                     realWaves++;
                 }
@@ -372,9 +460,10 @@ final class KnnGun {
      * 距离 ≥200 且非冲撞时为 0，不影响中远距 surfer。
      */
     private static double rammerAimBlend(double distance, double advancingVelocity) {
-        double byDist = distance < 160 ? RcMath.limit(0, (160 - distance) / 80, 1) : 0;
-        double byAdv = advancingVelocity > 5.5
-                ? RcMath.limit(0, (advancingVelocity - 5.5) / 2.5, 0.7) : 0;
+        double byDist = distance < RAMMER_AIM_DIST
+                ? RcMath.limit(0, (RAMMER_AIM_DIST - distance) / 80, 1) : 0;
+        double byAdv = advancingVelocity > RAMMER_AIM_ADV
+                ? RcMath.limit(0, (advancingVelocity - RAMMER_AIM_ADV) / 2.5, 0.7) : 0;
         return Math.max(byDist, byAdv);
     }
 
@@ -427,6 +516,106 @@ final class KnnGun {
             }
         }
         return bestGf;
+    }
+
+    private void recordPif(double latV, double heading, double velocity) {
+        double omega = hasEnemyHeading
+                ? Utils.normalRelativeAngle(heading - prevEnemyHeading) : 0;
+        pifLat[pifHead] = latV;
+        pifOmg[pifHead] = omega;
+        pifVel[pifHead] = velocity;
+        pifHead = (pifHead + 1) % PIF_CAP;
+        if (pifSize < PIF_CAP) {
+            pifSize++;
+        }
+        prevEnemyHeading = heading;
+        hasEnemyHeading = true;
+    }
+
+    private int pifAt(int logical) {
+        return (pifHead - pifSize + logical + PIF_CAP) % PIF_CAP;
+    }
+
+    /**
+     * 模式匹配 Play-It-Forward：在历史 (latV, omega) 窗口里找近邻，把匹配段之后的
+     * 速度/转向接到当前状态上积分到子弹到达。样本不足时退回匀速滑行。
+     * 只作为第三把虚拟枪；VG 分不领先不会开火。
+     */
+    private double pifGf(Point2D.Double myLocation, Point2D.Double enemyLocation,
+                         double enemyHeading, double enemyVelocity,
+                         double absBearing, double mea, double bulletSpeed) {
+        int n = pifSize;
+        int minFuture = 8;
+        if (n < PIF_PAT + minFuture) {
+            return linearPredictGf(myLocation, enemyLocation, enemyHeading,
+                    enemyVelocity, absBearing, mea, bulletSpeed);
+        }
+        int q0 = n - PIF_PAT;
+        int limit = n - PIF_PAT - minFuture;
+        double[] bestD = new double[PIF_K];
+        int[] bestI = new int[PIF_K];
+        for (int k = 0; k < PIF_K; k++) {
+            bestD[k] = Double.POSITIVE_INFINITY;
+            bestI[k] = -1;
+        }
+        int stride = n > 400 ? 2 : 1;
+        int oldest = Math.max(0, limit - 600);
+        for (int s = oldest; s < limit; s += stride) {
+            double d = 0;
+            for (int t = 0; t < PIF_PAT; t++) {
+                int hi = pifAt(s + t);
+                int qi = pifAt(q0 + t);
+                double dl = pifLat[hi] - pifLat[qi];
+                double dw = pifOmg[hi] - pifOmg[qi];
+                d += dl * dl + dw * dw * 16;
+            }
+            int worst = 0;
+            for (int k = 1; k < PIF_K; k++) {
+                if (bestD[k] > bestD[worst]) {
+                    worst = k;
+                }
+            }
+            if (d < bestD[worst]) {
+                bestD[worst] = d;
+                bestI[worst] = s;
+            }
+        }
+        double gfSum = 0;
+        double wSum = 0;
+        int flight = Math.min(80, Math.max(minFuture, (int) Math.ceil(
+                myLocation.distance(enemyLocation) / bulletSpeed)));
+        for (int k = 0; k < PIF_K; k++) {
+            if (bestI[k] < 0) {
+                continue;
+            }
+            Point2D.Double pos = new Point2D.Double(enemyLocation.x, enemyLocation.y);
+            double h = enemyHeading;
+            double[] vel = {enemyVelocity};
+            int fut0 = bestI[k] + PIF_PAT;
+            for (int t = 0; t < flight; t++) {
+                int fi = fut0 + t;
+                if (fi < n) {
+                    int idx = pifAt(fi);
+                    vel[0] = pifVel[idx];
+                    h += pifOmg[idx];
+                }
+                pos = RcMath.coastStep(pos, h, vel, field);
+                if ((t + 1) * bulletSpeed >= myLocation.distance(pos)) {
+                    break;
+                }
+            }
+            double offset = Utils.normalRelativeAngle(
+                    RcMath.absoluteBearing(myLocation, pos) - absBearing);
+            double gf = RcMath.limit(-1, offset / mea * enemyLateralDirection, 1);
+            double wgt = 1.0 / (1.0 + bestD[k]);
+            gfSum += wgt * gf;
+            wSum += wgt;
+        }
+        if (wSum < 1e-9) {
+            return linearPredictGf(myLocation, enemyLocation, enemyHeading,
+                    enemyVelocity, absBearing, mea, bulletSpeed);
+        }
+        return RcMath.limit(-1, gfSum / wSum, 1);
     }
 
     /** 假设敌人匀速滑行，子弹沿直线飞行时到达处对应的 GF。 */

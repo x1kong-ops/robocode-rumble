@@ -44,7 +44,8 @@ def load_battles(data_dir):
 
 def sample_examples(battles, n_queries, n_cand, min_history, rng, real_boost):
     """随机采 (query特征, 候选特征, 候选gf, query gf/width/重要度)，候选只来自同场更早的波。"""
-    sizes = np.array([b[1].shape[0] for b in battles], dtype=np.float64)
+    # 长局（mega 互耗）可达 10 万+ 波，按原始长度加权会淹没 mid 池；封顶后每场仍从全量历史里抽。
+    sizes = np.array([min(b[1].shape[0], 20000) for b in battles], dtype=np.float64)
     probs = sizes / sizes.sum()
     q_feat = np.empty((n_queries, DIMS))
     c_feat = np.empty((n_queries, n_cand, DIMS))
@@ -66,10 +67,28 @@ def sample_examples(battles, n_queries, n_cand, min_history, rng, real_boost):
     return q_feat, c_feat, c_gf, q_gf, q_w, q_imp
 
 
-def soft_knn_loss(u, batch):
+def embed_features(feat, w, a, b):
+    """BeepBoop: w * (x + b)^|a|. feat (..., D)."""
+    base = torch.clamp(feat + b, min=1e-9)
+    return w * torch.pow(base, torch.abs(a))
+
+
+def embed_features_np(feat, w, a, b):
+    base = np.maximum(feat + b, 1e-9)
+    return w * np.power(base, np.abs(a))
+
+
+def soft_knn_loss(u, batch, ua=None, ub=None):
     q_feat, c_feat, c_gf, q_gf, q_w, q_imp = batch
     w = torch.nn.functional.softplus(u)
-    diff = (q_feat.unsqueeze(1) - c_feat) * w          # (B, C, D)
+    if ua is None:
+        diff = (q_feat.unsqueeze(1) - c_feat) * w
+    else:
+        a = torch.nn.functional.softplus(ua)
+        b = torch.nn.functional.softplus(ub) * 0.05
+        eq = embed_features(q_feat.unsqueeze(1), w, a, b)
+        ep = embed_features(c_feat, w, a, b)
+        diff = eq - ep
     d = (diff * diff).sum(-1)                          # (B, C)
     attn = torch.softmax(-d, dim=1)
     z = (c_gf - q_gf.unsqueeze(1)) / q_w.unsqueeze(1)
@@ -78,19 +97,28 @@ def soft_knn_loss(u, batch):
     return -(q_imp * torch.log(p)).sum() / q_imp.sum()
 
 
-def hard_knn_eval(battles, weights, k=50, stride=3, min_history=100, chunk=512):
+def hard_knn_eval(battles, weights, k=50, stride=3, min_history=100, chunk=512,
+                  exponents=None, biases=None):
     """与 Java 运行时一致的评估：top-k 近邻 + KDE 峰值，车身窗口命中率。"""
-    w2 = (np.asarray(weights, dtype=np.float64) ** 2)[None, :]
+    w = np.asarray(weights, dtype=np.float64)
+    a = np.ones(DIMS) if exponents is None else np.asarray(exponents, dtype=np.float64)
+    b = np.zeros(DIMS) if biases is None else np.asarray(biases, dtype=np.float64)
     hits = 0.0
     total = 0
+    max_n = 20000  # 与运行时 60k cap 同量级的子集；全量 20 万波会 O(n²) 爆内存
     for _, feats, gfs, widths, _ in battles:
         n = feats.shape[0]
-        idx = np.arange(min_history, n, stride)
+        if n > max_n:
+            feats, gfs, widths = feats[-max_n:], gfs[-max_n:], widths[-max_n:]
+            n = max_n
+        step = stride if n < 8000 else max(stride, n // 2500)
+        idx = np.arange(min_history, n, step)
+        z = embed_features_np(feats, w, a, b)
         for s in range(0, len(idx), chunk):
             qs = idx[s:s + chunk]
             hi = qs.max()
-            pool, pool_gf = feats[:hi], gfs[:hi]
-            d = ((feats[qs, None, :] - pool[None, :, :]) ** 2 * w2).sum(-1)
+            pool, pool_gf = z[:hi], gfs[:hi]
+            d = ((z[qs, None, :] - pool[None, :, :]) ** 2).sum(-1)
             for row, qi in enumerate(qs):
                 dq = d[row, :qi]
                 kk = min(k, qi)
@@ -114,6 +142,8 @@ def main():
     ap.add_argument("--min-history", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--skip-eval", action="store_true")
+    ap.add_argument("--nonlinear", action="store_true",
+                    help="学 BeepBoop 嵌入 w*(x+b)^|a|（默认只学线性 w）")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -139,7 +169,15 @@ def main():
     # 初始化于手工权重（softplus 反函数）
     u0 = np.log(np.expm1(HAND_WEIGHTS))
     u = torch.tensor(u0, dtype=torch.float64, requires_grad=True)
-    opt = torch.optim.Adam([u], lr=args.lr)
+    ua = ub = None
+    params = [u]
+    if args.nonlinear:
+        ua = torch.tensor(np.full(DIMS, np.log(np.expm1(1.0))), dtype=torch.float64,
+                          requires_grad=True)
+        ub = torch.tensor(np.full(DIMS, -8.0), dtype=torch.float64, requires_grad=True)
+        params.extend([ua, ub])
+        args.lr = min(args.lr, 1e-3)
+    opt = torch.optim.Adam(params, lr=args.lr)
 
     def make_batch():
         b = sample_examples(train, args.batch, args.cand, args.min_history, rng, args.real_boost)
@@ -147,36 +185,49 @@ def main():
 
     ema = None
     for step in range(1, args.steps + 1):
-        loss = soft_knn_loss(u, make_batch())
+        loss = soft_knn_loss(u, make_batch(), ua, ub)
         opt.zero_grad()
         loss.backward()
         opt.step()
         ema = loss.item() if ema is None else 0.98 * ema + 0.02 * loss.item()
         if step % 300 == 0 or step == 1:
             w = torch.nn.functional.softplus(u).detach().numpy()
+            extra = ""
+            if ua is not None:
+                a = torch.nn.functional.softplus(ua).detach().numpy()
+                extra = " a=[" + " ".join(f"{x:.2f}" for x in a) + "]"
             print(f"step {step:5d}  loss(ema) {ema:.4f}  w=[" +
-                  " ".join(f"{x:.2f}" for x in w) + "]")
+                  " ".join(f"{x:.2f}" for x in w) + "]" + extra)
 
     w_learned = torch.nn.functional.softplus(u).detach().numpy()
-    # 尺度归一：硬 KNN 只看比例，导出时对齐手工权重的 L2 范数便于阅读
     w_export = w_learned * (np.linalg.norm(HAND_WEIGHTS) / np.linalg.norm(w_learned))
+    a_export = np.ones(DIMS)
+    b_export = np.zeros(DIMS)
+    if ua is not None:
+        a_export = torch.nn.functional.softplus(ua).detach().numpy()
+        b_export = (torch.nn.functional.softplus(ub) * 0.05).detach().numpy()
 
-    print("\nfeature        hand   learned(raw)  export")
-    for name, h, lr_, e in zip(FEATURE_NAMES, HAND_WEIGHTS, w_learned, w_export):
-        print(f"{name:12s} {h:6.2f} {lr_:12.3f} {e:8.3f}")
+    print("\nfeature        hand   w_export    a       b")
+    for name, h, we, ae, be in zip(FEATURE_NAMES, HAND_WEIGHTS, w_export, a_export, b_export):
+        print(f"{name:12s} {h:6.2f} {we:8.3f} {ae:7.3f} {be:7.3f}")
 
     if not args.skip_eval:
         print("\nhard-KNN val (top-50 + KDE peak, bot-width hit rate):")
         acc_h, n1 = hard_knn_eval(val, HAND_WEIGHTS)
-        print(f"  hand    weights: {acc_h:.4f}  ({n1} queries)")
-        acc_l, _ = hard_knn_eval(val, w_export)
-        print(f"  learned weights: {acc_l:.4f}")
+        print(f"  linear  hand: {acc_h:.4f}  ({n1} queries)")
+        acc_l, _ = hard_knn_eval(val, w_export, exponents=a_export, biases=b_export)
+        print(f"  learned:      {acc_l:.4f}")
         rel = (acc_l / max(acc_h, 1e-9) - 1) * 100
         print(f"  relative: {rel:+.1f}%")
 
     print("\n// Java:")
     print("private static final double[] WEIGHTS = {"
           + ", ".join(f"{x:.3f}" for x in w_export) + "};")
+    if args.nonlinear:
+        print("private static final double[] EXPONENTS = {"
+              + ", ".join(f"{x:.3f}" for x in a_export) + "};")
+        print("private static final double[] BIASES = {"
+              + ", ".join(f"{x:.3f}" for x in b_export) + "};")
 
 
 if __name__ == "__main__":
