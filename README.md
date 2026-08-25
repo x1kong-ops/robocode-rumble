@@ -177,6 +177,9 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
   - 四模式走位（SURF / WavePoison / FAR / SHIELD），按对手得分区间选择并跨场保存。
   - 第三把虚拟枪 PM-PIF：仅在记分明显领先时开火。
   - Beam Path 搜索 + 末端刹停门控（敌枪打得中才启用）。
+- **v1.5（2026-08-25）**：
+  - RoboRumble 1v1 为 35 回合：ModeBook 不再轮询 FAR/SHIELD（线上 rammer 存活 90%+、APS ~70%）。短场固定 SURF。
+  - `System.getProperty` 加沙箱保护，避免部分客户端 SecurityManager 打断 `run()`。
 
 明确不做：rambot / mirror movement、以 bullet shielding 为主力、端到端深度强化学习、在 True vs GoTo 选型上纠结。
 
@@ -185,7 +188,7 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
 ### 本机已就绪
 
 - **评分客户端 1.9.4.2**：已解压到 `C:\robocode-1.9.4.2`（开发仍可用 `C:\robocode` 1.10.3）。
-- **打包脚本**：`.\scripts\package-upload.ps1 -Version 1.4 -RobocodeHome C:\robocode-1.9.4.2` → 产出 `dist\<classname>_1.4.jar`。
+- **打包脚本**：`.\scripts\package-upload.ps1 -Version 1.5 -RobocodeHome C:\robocode-1.9.4.2` → 产出 `dist\<classname>_1.5.jar`。
 - **改包名脚本**：`.\scripts\rename-package.ps1 -NewPackage <你的唯一包.类名>`（例 `pc.Wavelet`；**不能有下划线**，须全局唯一）。
 - 1.9.4.2 冒烟已通过（vs sample.Tracker）；强对手 JAR 已同步进该安装的 `robots/`。
 
@@ -193,14 +196,14 @@ python ml\eval_per_enemy.py                           # 枪权重按对手分解
 
 1. ~~改包名~~ → **`pc.Wavelet`**（源码在 `src/pc/`）。
 2. ~~1.9.4.2 testbed~~ → 50 回合平均 **86.4%**（与 1.10.3 开发机一致）。
-3. ~~打包~~ → `dist/pc.Wavelet_1.4.jar`（已部署到 `C:\robocode-1.9.4.2\robots\`）。
+3. ~~打包~~ → `dist/pc.Wavelet_1.5.jar`（已部署到 `C:\robocode-1.9.4.2\robots\`）。
 4. ~~托管 JAR~~ → GitHub Release：
-   https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.4/pc.Wavelet_1.4.jar
+   https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.5/pc.Wavelet_1.5.jar
 5. **RoboWiki Participants**（删掉旧版行，换成）：
-   `pc.Wavelet 1.4,https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.4/pc.Wavelet_1.4.jar`
-6. 跑 rumble：`C:\robocode-1.9.4.2\roborumble\roborumble.bat`（`USER=JustinKong971013`；本机 `particip1v1.txt` 指到 1.4）。
+   `pc.Wavelet 1.5,https://github.com/x1kong-ops/robocode-rumble/releases/download/v1.5/pc.Wavelet_1.5.jar`
+6. 跑 rumble：`C:\robocode-1.9.4.2\roborumble\roborumble.bat`（`USER=JustinKong971013`；本机 `particip1v1.txt` 指到 1.5）。
 
-仓库：https://github.com/x1kong-ops/robocode-rumble · Release：https://github.com/x1kong-ops/robocode-rumble/releases/tag/v1.4
+仓库：https://github.com/x1kong-ops/robocode-rumble · Release：https://github.com/x1kong-ops/robocode-rumble/releases/tag/v1.5
 
 规则摘要：须有 package、JAR、同目录 `.properties`；命名与内部结构一致；Java 8–17 字节码均可（本项目 `--release 8`）。
 

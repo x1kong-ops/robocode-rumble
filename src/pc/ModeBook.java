@@ -97,7 +97,7 @@ final class ModeBook {
             }
         }
         if (selectedRound != roundNum) {
-            current = select(live);
+            current = select(live, robot.getNumRounds());
             picks[current]++;
             selectedRound = roundNum;
         }
@@ -216,8 +216,13 @@ final class ModeBook {
     /**
      * 未测按 SURF → POISON → FAR → SHIELD 各打一回合。
      * 上界低于其余模式最高均值则淘汰；存活者证据够则锁高均值，否则探不确定度。
+     * RoboRumble 1v1 固定 35 回合：CI 探索在结算前会把整场轮完四个模式，
+     * FAR/SHIELD 打 rammer 会赢回合但刷不出伤害（线上 SuperRamFire / WaveRammer ~70% APS、存活 90%+）。
      */
-    private static int select(double[] v) {
+    private static int select(double[] v, int numRounds) {
+        if (numRounds > 0 && numRounds <= 40) {
+            return SURF;
+        }
         if (v[0] + v[1] <= 0) {
             return SURF;
         }

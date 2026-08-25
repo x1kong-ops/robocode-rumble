@@ -115,7 +115,13 @@ final class Params {
         if (robot == null) {
             return;
         }
-        String spec = System.getProperty("pc.params." + robot.getClass().getSimpleName());
+        String spec = null;
+        try {
+            spec = System.getProperty("pc.params." + robot.getClass().getSimpleName());
+        } catch (Exception ignored) {
+            live.source = "default";
+            return;
+        }
         if (spec == null || spec.length() == 0) {
             live.source = "default";
             return;
